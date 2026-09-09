@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>io.github.wpunit13</groupId>
+    <artifactId>spark-mutator-parent</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+    <relativePath>../pom.xml</relativePath>
+  </parent>
+
+  <artifactId>catalyst-interceptor</artifactId>
+  <packaging>pom</packaging>
+
+  <name>catalyst-interceptor (aggregator)</name>
+  <description>
+    Aggregator for the Scala side of the engine. Four layers, strictly ordered:
+
+      interceptor-api       - Spark-agnostic SPI. No concrete Catalyst types.
+      interceptor-dispatch  - ServiceLoader-based runtime shim selection.
+      interceptor-runtime   - SparkSessionExtensions + Rule[LogicalPlan].
+      interceptor-spark-*   - One implementation per Spark/Scala binary cell.
+      interceptor-bundle-*  - Shaded fat jar consumed by the Python wheel.
+
+    Module order below is the dependency order and Maven honours it.
+    interceptor-bundle-* is listed LAST because it packages every other
+    module, so it must build after all of them.
+
+    Note that interceptor-spark-3.5_2.13 builds BEFORE interceptor-runtime
+    is tested: runtime test-depends on the shim to exercise ServiceLoader
+    resolution end to end. Maven resolves this ordering automatically from
+    the declared dependencies; the listing order here is documentation.
+  </description>
+
+  <modules>
+    <module>interceptor-api</module>
+    <module>interceptor-dispatch</module>
+    <module>interceptor-spark-3.5_2.13</module>
+    <module>interceptor-runtime</module>
+    <module>interceptor-bundle</module>
+  </modules>
+</project>

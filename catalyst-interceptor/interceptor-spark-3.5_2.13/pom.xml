@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>io.github.wpunit13</groupId>
+    <artifactId>spark-mutator-parent</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+    <relativePath>../../pom.xml</relativePath>
+  </parent>
+
+  <artifactId>interceptor-spark-3.5_2.13</artifactId>
+  <packaging>jar</packaging>
+
+  <name>interceptor-spark-3.5_2.13</name>
+  <description>
+    PlanMutatorShim implementation for Spark 3.5.x / Scala 2.13.
+
+    This is the ONLY module permitted to import concrete Catalyst case classes
+    (Join, Filter, Aggregate, Window, Project) and pattern-match on them.
+    When a future Spark release changes those signatures, the blast radius is
+    confined to a module like this one.
+
+    Spark and Scala versions are inherited from the root pom for now, since
+    exactly one shim exists. When a SECOND shim is added, override
+    spark.version, scala.version and scala.binary.version as module-local
+    properties in each shim, so the cells are independently pinned.
+
+    NOTE: this module produces a THIN jar (its own classes only). The fat jar
+    that the Python wheel mounts is produced by interceptor-bundle, which
+    exists to avoid a reactor cycle: interceptor-runtime test-depends on
+    this module, so this module cannot depend on interceptor-runtime.
+  </description>
+
+  <dependencies>
+    <dependency>
+      <groupId>org.scala-lang</groupId>
+      <artifactId>scala-library</artifactId>
+      <scope>provided</scope>
+    </dependency>
+
+    <dependency>
+      <groupId>io.github.wpunit13</groupId>
+      <artifactId>interceptor-api</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>org.apache.spark</groupId>
+      <artifactId>spark-catalyst_${scala.binary.version}</artifactId>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.spark</groupId>
+      <artifactId>spark-sql_${scala.binary.version}</artifactId>
+      <scope>provided</scope>
+    </dependency>
+
+    <!--
+      ShimImplSpec builds a real local SparkSession to obtain genuine analyzed
+      LogicalPlan nodes. Provided-scope deps are on the test classpath in
+      Maven, so spark-sql/spark-catalyst above are already available to tests;
+      no test-scope re-declaration is needed.
+    -->
+    <dependency>
+      <groupId>org.scalatest</groupId>
+      <artifactId>scalatest_${scala.binary.version}</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>net.alchim31.maven</groupId>
+        <artifactId>scala-maven-plugin</artifactId>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <configuration>
+          <skipTests>true</skipTests>
+        </configuration>
+      </plugin>
+      <plugin>
+        <groupId>org.scalatest</groupId>
+        <artifactId>scalatest-maven-plugin</artifactId>
+      </plugin>
+    </plugins>
+  </build>
+</project>

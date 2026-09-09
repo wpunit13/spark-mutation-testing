@@ -1,0 +1,237 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>io.github.wpunit13</groupId>
+  <artifactId>spark-mutator-parent</artifactId>
+  <version>1.0.0-SNAPSHOT</version>
+  <packaging>pom</packaging>
+
+  <name>spark-mutator (parent)</name>
+  <description>
+    Zero-touch semantic mutation testing engine for Apache Spark.
+    Root aggregator. Declares every shared version and plugin configuration;
+    child modules should declare NO versions of their own.
+  </description>
+
+  <modules>
+    <module>mutator-core</module>
+    <module>catalyst-interceptor</module>
+    <module>maven-plugin</module>
+  </modules>
+
+  <properties>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+    <maven.compiler.release>17</maven.compiler.release>
+
+    <!--
+      Spark / Scala target for the ONLY shim currently supported.
+      Pinned to exact patch versions on purpose: Catalyst case-class signatures
+      have broken across patch releases before, so CI must test what we claim.
+      Spark 3.5.x officially builds against Scala 2.13.8; matching it exactly
+      minimises binary-compatibility risk.
+      Adding a new version means a NEW shim module with its own pinned values,
+      never editing these.
+    -->
+    <spark.version>3.5.3</spark.version>
+    <scala.version>2.13.8</scala.version>
+    <scala.binary.version>2.13</scala.binary.version>
+
+    <jackson.version>2.17.2</jackson.version>
+    <junit.version>5.10.2</junit.version>
+    <scalatest.version>3.2.18</scalatest.version>
+
+    <maven.plugin.tools.version>3.13.1</maven.plugin.tools.version>
+    <maven.api.version>3.9.6</maven.api.version>
+
+    <plugin.compiler.version>3.13.0</plugin.compiler.version>
+    <plugin.surefire.version>3.2.5</plugin.surefire.version>
+    <plugin.shade.version>3.5.3</plugin.shade.version>
+    <plugin.scala.version>4.9.2</plugin.scala.version>
+    <plugin.scalatest.version>2.2.0</plugin.scalatest.version>
+    <plugin.jar.version>3.4.1</plugin.jar.version>
+
+    <!--
+      MANDATORY for running Spark on Java 17.
+      Spark 3.5 reaches into JDK internals (Platform/Unsafe, Kryo, NIO cleaner).
+      Without these, every test that builds a SparkSession dies with
+      InaccessibleObjectException or IllegalAccessError. Keep on ONE line:
+      Surefire passes argLine through largely verbatim and embedded newlines
+      break argument parsing on some shells.
+      Applied to both Surefire (Java tests) and the ScalaTest plugin below.
+    -->
+    <spark.test.jvm.args>-Xmx2g -XX:+IgnoreUnrecognizedVMOptions --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.lang.invoke=ALL-UNNAMED --add-opens=java.base/java.lang.reflect=ALL-UNNAMED --add-opens=java.base/java.io=ALL-UNNAMED --add-opens=java.base/java.net=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED --add-opens=java.base/java.util=ALL-UNNAMED --add-opens=java.base/java.util.concurrent=ALL-UNNAMED --add-opens=java.base/java.util.concurrent.atomic=ALL-UNNAMED --add-opens=java.base/sun.nio.ch=ALL-UNNAMED --add-opens=java.base/sun.nio.cs=ALL-UNNAMED --add-opens=java.base/sun.security.action=ALL-UNNAMED --add-opens=java.base/sun.util.calendar=ALL-UNNAMED -Djdk.reflect.useDirectMethodHandle=false -Dio.netty.tryReflectionSetAccessible=true</spark.test.jvm.args>
+  </properties>
+
+  <dependencyManagement>
+    <dependencies>
+      <!-- Internal modules: version-free references everywhere else. -->
+      <dependency>
+        <groupId>io.github.wpunit13</groupId>
+        <artifactId>mutator-core</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>io.github.wpunit13</groupId>
+        <artifactId>interceptor-api</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>io.github.wpunit13</groupId>
+        <artifactId>interceptor-dispatch</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>io.github.wpunit13</groupId>
+        <artifactId>interceptor-runtime</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>io.github.wpunit13</groupId>
+        <artifactId>interceptor-spark-3.5_2.13</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+
+      <dependency>
+        <groupId>com.fasterxml.jackson.core</groupId>
+        <artifactId>jackson-databind</artifactId>
+        <version>${jackson.version}</version>
+      </dependency>
+
+      <dependency>
+        <groupId>org.scala-lang</groupId>
+        <artifactId>scala-library</artifactId>
+        <version>${scala.version}</version>
+      </dependency>
+
+      <!--
+        Spark is ALWAYS provided (or test) scope, never compile, and is never
+        shaded into any artifact. It comes from the consumer's classpath at
+        runtime. If you find yourself wanting compile scope, something is wrong.
+      -->
+      <dependency>
+        <groupId>org.apache.spark</groupId>
+        <artifactId>spark-sql_${scala.binary.version}</artifactId>
+        <version>${spark.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.spark</groupId>
+        <artifactId>spark-catalyst_${scala.binary.version}</artifactId>
+        <version>${spark.version}</version>
+      </dependency>
+
+      <dependency>
+        <groupId>org.junit</groupId>
+        <artifactId>junit-bom</artifactId>
+        <version>${junit.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+
+      <dependency>
+        <groupId>org.scalatest</groupId>
+        <artifactId>scalatest_${scala.binary.version}</artifactId>
+        <version>${scalatest.version}</version>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+
+  <build>
+    <pluginManagement>
+      <plugins>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-compiler-plugin</artifactId>
+          <version>${plugin.compiler.version}</version>
+        </plugin>
+
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-jar-plugin</artifactId>
+          <version>${plugin.jar.version}</version>
+        </plugin>
+
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-surefire-plugin</artifactId>
+          <version>${plugin.surefire.version}</version>
+          <configuration>
+            <argLine>${spark.test.jvm.args}</argLine>
+            <!--
+              Spark's driver is not safe to run concurrently in one JVM, and
+              MutantRegistry is a JVM-wide singleton. Forking once and running
+              sequentially is required for correctness, not just tidiness.
+            -->
+            <forkCount>1</forkCount>
+            <reuseForks>true</reuseForks>
+            <parallel>none</parallel>
+          </configuration>
+        </plugin>
+
+        <plugin>
+          <groupId>net.alchim31.maven</groupId>
+          <artifactId>scala-maven-plugin</artifactId>
+          <version>${plugin.scala.version}</version>
+          <configuration>
+            <scalaVersion>${scala.version}</scalaVersion>
+            <args>
+              <arg>-deprecation</arg>
+              <arg>-feature</arg>
+              <arg>-unchecked</arg>
+            </args>
+          </configuration>
+          <executions>
+            <execution>
+              <id>scala-compile</id>
+              <goals>
+                <goal>add-source</goal>
+                <goal>compile</goal>
+              </goals>
+            </execution>
+            <execution>
+              <id>scala-test-compile</id>
+              <goals>
+                <goal>testCompile</goal>
+              </goals>
+            </execution>
+          </executions>
+        </plugin>
+
+        <plugin>
+          <groupId>org.scalatest</groupId>
+          <artifactId>scalatest-maven-plugin</artifactId>
+          <version>${plugin.scalatest.version}</version>
+          <configuration>
+            <reportsDirectory>${project.build.directory}/surefire-reports</reportsDirectory>
+            <junitxml>.</junitxml>
+            <filereports>scalatest-output.txt</filereports>
+            <argLine>${spark.test.jvm.args}</argLine>
+          </configuration>
+          <executions>
+            <execution>
+              <id>scalatest-test</id>
+              <goals>
+                <goal>test</goal>
+              </goals>
+            </execution>
+          </executions>
+        </plugin>
+
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-shade-plugin</artifactId>
+          <version>${plugin.shade.version}</version>
+        </plugin>
+
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-plugin-plugin</artifactId>
+          <version>${maven.plugin.tools.version}</version>
+        </plugin>
+      </plugins>
+    </pluginManagement>
+  </build>
+</project>

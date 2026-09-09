@@ -1,0 +1,114 @@
+# ---------------------------------------------------------------------------
+# spark-mutator .gitignore
+#
+# NOTE: docs/ is deliberately NOT ignored. It holds ARCHITECTURE.md,
+# CONTRACTS.md, EXECUTION_PLAN.md and docs/packets/*, which are the primary
+# specification deliverables and must be version controlled.
+#
+# Correctness here is load-bearing: several agent work packets instruct the
+# coding agent to verify `git status --porcelain` shows only in-scope files.
+# If build output leaks into that view, the check becomes noise and the
+# guardrail stops working.
+# ---------------------------------------------------------------------------
+
+# --- Maven / JVM build output ----------------------------------------------
+target/
+!**/src/**/target/
+*.class
+*.jar
+*.war
+*.ear
+# Keep the local-repo experiment dir and Maven's own status files out too
+.mvn/timing.properties
+.mvn/wrapper/maven-wrapper.jar
+dependency-reduced-pom.xml
+
+# --- Bundled shim jars (build artifacts, NOT source) ------------------------
+# python/build_hooks/bundle_jars.py copies the fat jar from
+# catalyst-interceptor/interceptor-bundle/target/ into this directory at build
+# time. It must never be committed: it is ~2.3 MB, rebuilt on every change,
+# and would make the repo history balloon.
+# The .gitkeep is tracked so the directory exists for importlib.resources.
+python/pytest_spark_mutator/jars/*
+!python/pytest_spark_mutator/jars/.gitkeep
+
+# --- Python -----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+sdist/
+wheels/
+*.egg-info/
+.eggs/
+*.egg
+MANIFEST
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# Test / tooling caches
+.pytest_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+
+# --- Spark test detritus ----------------------------------------------------
+# Every test that builds a real SparkSession drops these in the working
+# directory. They are regenerated per run and must never be committed.
+spark-warehouse/
+metastore_db/
+derby.log
+*.crc
+.spark-staging/
+
+# --- spark-mutator report output --------------------------------------------
+# The default output_dir is target/spark-mutator-reports (already covered by
+# target/), but examples and ad-hoc runs may write elsewhere.
+spark-mutator-reports/
+mutation-report.json
+mutation-report.sarif
+mutation-report.html
+
+# --- IDE / editor -----------------------------------------------------------
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+*.swp
+*.swo
+*~
+.metals/
+.bloop/
+.bsp/
+.scala-build/
+
+# --- OS ---------------------------------------------------------------------
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+desktop.ini
+
+# --- Logs / temp ------------------------------------------------------------
+*.log
+*.tmp
+hs_err_pid*
+replay_pid*
+
+docs
