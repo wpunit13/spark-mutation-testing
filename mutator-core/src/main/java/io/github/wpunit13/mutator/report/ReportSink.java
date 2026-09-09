@@ -1,0 +1,144 @@
+package io.github.wpunit13.mutator.report;
+
+import io.github.wpunit13.mutator.catalog.MutationCatalogAccess;
+import io.github.wpunit13.mutator.model.MutantMetadata;
+import io.github.wpunit13.mutator.model.MutantResult;
+import io.github.wpunit13.mutator.model.MutantStatus;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.Collection;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+
+/**
+ * JVM-wide singleton receiving each mutant's terminal outcome from the
+ * Python harness, and finalizing the report artifacts.
+ */
+public final class ReportSink {
+
+    private static final String NO_OUTCOME_DETAIL = "no outcome recorded; run terminated early";
+
+    private final Map<String, MutantResult> results = new ConcurrentHashMap<>();
+
+    private ReportSink() {
+    }
+
+    private static ReportSink instance() {
+        return Holder.INSTANCE;
+    }
+
+    private static final class Holder {
+        static final ReportSink INSTANCE = new ReportSink();
+    }
+
+    /**
+     * Records one mutant's terminal outcome. Called by the Python harness
+     * immediately after classifying a mutant, once per mutant, exactly once.
+     *
+     * @param mutantId must already exist in the catalog.
+     * @param status one of "KILLED", "SURVIVED", "TIMED_OUT", "ERRORED"
+     *        (exact string match, case-sensitive; any other value throws
+     *        IllegalArgumentException).
+     * @param elapsedMillis wall-clock duration of this mutant's test execution.
+     * @param failureDetailOrNull for KILLED/ERRORED: the failing assertion
+     *        message or exception string; null for SURVIVED; null or a
+     *        diagnostic reason string for TIMED_OUT.
+     * @throws IllegalArgumentException if mutantId is unknown or status is not
+     *         a valid enum value.
+     * @throws IllegalStateException if this mutantId has already been recorded
+     *         (results are write-once; re-recording indicates a harness-level
+     *         double-execution bug).
+     */
+    public static void recordOutcome(
+            String mutantId,
+            String status,
+            long elapsedMillis,
+            String failureDetailOrNull) {
+        MutantStatus parsed;
+        try {
+            parsed = MutantStatus.valueOf(status);
+        } catch (IllegalArgumentException | NullPointerException e) {
+            throw new IllegalArgumentException(
+                    "Unknown status '" + status + "': must be one of "
+                            + java.util.Arrays.toString(MutantStatus.values()) + ".");
+        }
+        if (MutationCatalogAccess.findByIdOrNull(mutantId) == null) {
+            throw new IllegalArgumentException(
+                    "Unknown mutantId '" + mutantId + "': not present in the catalog.");
+        }
+        MutantResult result = new MutantResult(
+                mutantId,
+                parsed,
+                elapsedMillis,
+                failureDetailOrNull,
+                System.currentTimeMillis());
+        if (instance().results.putIfAbsent(mutantId, result) != null) {
+            throw new IllegalStateException(
+                    "Mutant '" + mutantId + "' has already been recorded; results are write-once.");
+        }
+    }
+
+    /**
+     * Finalizes and writes all configured report artifacts (terminal table,
+     * HTML, mutation-report.json, SARIF) to the configured output directory.
+     * Called once, after the mutation loop exhausts all mutants.
+     *
+     * @return the absolute path of the primary mutation-report.json as a String.
+     */
+    public static String finalizeAndWriteReports() {
+        Path outputDir = resolveOutputDir();
+        Map<String, MutantResult> working = instance().results;
+        // Every catalogued mutant with no recorded result is synthesized as
+        // ERRORED so the written schema never carries a null result object.
+        for (MutantMetadata meta : MutationCatalogAccess.allEntries()) {
+            working.putIfAbsent(
+                    meta.getMutantId(),
+                    new MutantResult(
+                            meta.getMutantId(),
+                            MutantStatus.ERRORED,
+                            0L,
+                            NO_OUTCOME_DETAIL,
+                            System.currentTimeMillis()));
+        }
+        Collection<MutantMetadata> catalog = MutationCatalogAccess.allEntries();
+        Map<String, MutantResult> snapshot = Map.copyOf(working);
+        Path jsonPath;
+        try {
+            Path json = JsonReportWriter.write(outputDir, catalog, snapshot);
+            SarifReportWriter.write(outputDir, catalog, snapshot);
+            HtmlReportWriter.write(outputDir, catalog, snapshot);
+            jsonPath = json;
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to write reports to " + outputDir, e);
+        }
+        return jsonPath.toAbsolutePath().toString();
+    }
+
+    /** Read accessor used by the report writers. */
+    static Map<String, MutantResult> snapshotResults() {
+        return Map.copyOf(instance().results);
+    }
+
+    /** Test-only reset; clears every recorded outcome. */
+    public static void clearForTesting() {
+        instance().results.clear();
+    }
+
+    private static Path resolveOutputDir() {
+        String configured = System.getProperty("spark.mutator.output.dir");
+        if (configured == null || configured.isBlank()) {
+            configured = System.getenv("SPARK_MUTATOR_OUTPUT_DIR");
+        }
+        Path dir = configured == null || configured.isBlank()
+                ? Paths.get("target", "spark-mutator-reports")
+                : Paths.get(configured);
+        try {
+            Files.createDirectories(dir);
+        } catch (IOException e) {
+            throw new IllegalStateException("Could not create output directory " + dir, e);
+        }
+        return dir;
+    }
+}
