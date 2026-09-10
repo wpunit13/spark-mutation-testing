@@ -5,6 +5,7 @@ requires-python = ">=3.9"
 dependencies = [
     "pyspark>=3.5,<3.6",
     "py4j>=0.10.9",
+    "tomli; python_version < '3.11'",
 ]
 
 [project.optional-dependencies]
