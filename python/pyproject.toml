@@ -11,5 +11,8 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=7.0"]
 
+[project.entry-points.pytest11]
+spark_mutator = "pytest_spark_mutator.plugin"
+
 [tool.setuptools.packages.find]
 include = ["pytest_spark_mutator*"]
