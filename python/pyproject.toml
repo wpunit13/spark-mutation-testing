@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "pytest-spark-mutator"
 version = "0.1.0"
@@ -16,3 +20,6 @@ spark_mutator = "pytest_spark_mutator.plugin"
 
 [tool.setuptools.packages.find]
 include = ["pytest_spark_mutator*"]
+
+[tool.setuptools.package-data]
+pytest_spark_mutator = ["jars/*.jar"]
