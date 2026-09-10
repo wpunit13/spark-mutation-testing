@@ -69,18 +69,15 @@ public final class SessionResetFacade {
             }
 
             // Step 3: invalidate session catalog metadata so stale resolved
-            // CatalogTable/file-index fragments cannot be reused.
-            // TODO(spec-gap): the checklist names "spark.sessionState.catalog.invalidateAll()",
-            //  but Spark 3.5.3's SessionCatalog has no such method; the same
-            //  metadata-cache invalidation is exposed as invalidateAllCachedTables().
-            //  We try the documented name first and fall back to the 3.5 name.
+            // CatalogTable/file-index fragments cannot be reused. The checklist
+            // (§3.1 item 3) names "spark.sessionState.catalog.invalidateAll()",
+            // but Spark's SessionCatalog exposes no method by that name; the real
+            // public method for discarding every cached table/relation plan is
+            // invalidateAllCachedTables() (verified against Spark 3.5.3's
+            // SessionCatalog.scala). Call the real method directly.
             Object sessionState = invoke(spark, "sessionState");
             Object sessionCatalog = invoke(sessionState, "catalog");
-            try {
-                invoke(sessionCatalog, "invalidateAll");
-            } catch (NoSuchMethodException renamedInSpark35) {
-                invoke(sessionCatalog, "invalidateAllCachedTables");
-            }
+            invoke(sessionCatalog, "invalidateAllCachedTables");
 
             // Step 4: snapshot temp views and drop all temporary ones.
             List<String> droppedTempViews = dropTempViews(spark);

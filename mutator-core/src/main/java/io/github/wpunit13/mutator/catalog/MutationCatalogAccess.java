@@ -29,11 +29,14 @@ public final class MutationCatalogAccess {
         return InMemoryMutationCatalog.getInstance();
     }
 
-    // TODO(spec-gap): the report layer lives in a different package and needs
-    //  the full catalog for finalizeAndWriteReports(); no public read accessor
-    //  for the full entry set was specified. Narrowest addition: expose the
-    //  unmodifiable snapshot here. Question: should this be a named contract
-    //  method or should the report layer be granted package access?
+    /**
+     * Returns an unmodifiable snapshot of every catalogued mutant, including
+     * {@code astDiffSnippet} (which {@link #getFullCatalogJson()} deliberately
+     * omits). The report layer lives in a different package and needs the full
+     * entry set to synthesize missing outcomes and hand the writers a complete
+     * catalog; this public accessor is the narrowest way to expose it without
+     * coupling the two packages.
+     */
     public static Collection<MutantMetadata> allEntries() {
         return InMemoryMutationCatalog.getInstance().allEntries();
     }
