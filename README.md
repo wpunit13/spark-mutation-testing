@@ -1,5 +1,5 @@
 <p align="center">
-  <h1 align="center">⚡ spark-mutator</h1>
+  <h1 align="center">⚡ spark-mutation-testing</h1>
   <p align="center">
     <strong>Zero-touch mutation testing for Apache Spark</strong>
   </p>
@@ -11,7 +11,7 @@
   </p>
 </p>
 
-`spark-mutator` rewrites your **Catalyst logical plans during test execution** and
+`spark-mutation-testing` rewrites your **Catalyst logical plans during test execution** and
 reports whether your tests actually notice. It's the difference between a test
 suite that *passes* and one that *protects*.
 
@@ -30,7 +30,7 @@ A green test suite can still be blind to the bugs that actually ship:
 | `INNER → LEFT / CROSS / ANTI` | your data lacks unmatched-key coverage |
 | `A ∧ B → A`, `B`, `false`, `¬P` | incomplete branch coverage, redundant predicates |
 
-`spark-mutator` injects these and classifies each one:
+`spark-mutation-testing` injects these and classifies each one:
 
 | Outcome | Meaning |
 | --- | --- |

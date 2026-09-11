@@ -1,4 +1,4 @@
-# Project Specification: Spark Semantic Mutation Testing Engine (`spark-mutator`)
+# Project Specification: Spark Semantic Mutation Testing Engine (`spark-mutation-testing`)
 
 > **Note:** This is the *target* specification — the full vision and requirements,
 > not the current state. See the [README](../README.md) for what is implemented
@@ -9,7 +9,7 @@
 ## 1. Overview & Problem Statement
 Traditional mutation testing tools (like PIT) operate on JVM bytecode and cannot evaluate distributed query semantics, while standard test suites often pass despite lacking coverage for join edge cases, filter drops, or window boundary changes. 
 
-`spark-mutator` is a zero-touch semantic mutation testing framework for Apache Spark that mutates Spark Catalyst Logical Plans and AST expressions directly during automated test execution. It operates out of a single monorepository providing unified mutation semantics across **Java, Scala, and PySpark** test pipelines.
+`spark-mutation-testing` is a zero-touch semantic mutation testing framework for Apache Spark that mutates Spark Catalyst Logical Plans and AST expressions directly during automated test execution. It operates out of a single monorepository providing unified mutation semantics across **Java, Scala, and PySpark** test pipelines.
 
 ---
 
