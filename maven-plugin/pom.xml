@@ -6,15 +6,15 @@
 
   <parent>
     <groupId>io.github.wpunit13</groupId>
-    <artifactId>spark-mutator-parent</artifactId>
+    <artifactId>spark-mutation-testing-parent</artifactId>
     <version>1.0.0-SNAPSHOT</version>
     <relativePath>../pom.xml</relativePath>
   </parent>
 
-  <artifactId>spark-mutator-maven-plugin</artifactId>
+  <artifactId>spark-mutation-testing-maven-plugin</artifactId>
   <packaging>maven-plugin</packaging>
 
-  <name>spark-mutator-maven-plugin</name>
+  <name>spark-mutation-testing-maven-plugin</name>
   <description>
     Maven plugin for Java and Scala pipelines.
 
@@ -26,27 +26,27 @@
 
     The module exists so that:
       1. the full reactor builds and installs cleanly, and
-      2. the artifact coordinate io.github.wpunit13:spark-mutator-maven-plugin
+      2. the artifact coordinate io.github.wpunit13:spark-mutation-testing-maven-plugin
          quoted in the project README actually resolves.
 
-    Use the pytest-spark-mutator Python plugin for PySpark pipelines; that
+    Use the pytest-spark-mutation-testing Python plugin for PySpark pipelines; that
     track is complete.
   </description>
 
   <properties>
     <!--
-      Prefix for goal invocation: mvn spark-mutator:mutate
+      Prefix for goal invocation: mvn spark-mutation-testing:mutate
       Without this, Maven derives the prefix from the artifactId, which would
-      also give "spark-mutator" here, but pinning it makes the contract
+      also give "spark-mutation-testing" here, but pinning it makes the contract
       explicit and stable if the artifactId ever changes.
     -->
-    <goalPrefix>spark-mutator</goalPrefix>
+    <goalPrefix>spark-mutation-testing</goalPrefix>
   </properties>
 
   <dependencies>
     <dependency>
       <groupId>io.github.wpunit13</groupId>
-      <artifactId>mutator-core</artifactId>
+      <artifactId>spark-mutation-testing-core</artifactId>
     </dependency>
 
     <dependency>

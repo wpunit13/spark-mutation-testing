@@ -51,7 +51,7 @@ tests detect:
 ## Quick start
 
 ```bash
-pip install pytest-spark-mutator
+pip install pytest-spark-mutation-testing
 cd your-pipeline
 pytest --spark-mutate
 ```
@@ -136,6 +136,49 @@ the whole point.** See `examples/pyspark-pipeline/` for a runnable proof.
 
 The Java/Scala Maven-plugin path and further mutators (aggregate, window,
 null/type) are on the roadmap — see [`docs/core_idea.md`](docs/core_idea.md).
+
+---
+
+## Building from source
+
+### Prerequisites
+
+- **Java 17** (Spark 3.5 requires Java 17 for Scala 2.13 compilation)
+- **Apache Maven 3.8+**
+- **Python 3.9+** with `pytest` and `pyspark`
+
+### 1. Build and package the Java/Scala engine
+
+```bash
+mvn clean package -DskipTests
+```
+This compiles `spark-mutation-testing-core`, the Catalyst interceptor shims, and creates the shaded uber-jar at `catalyst-interceptor/interceptor-bundle/target/interceptor-spark-3.5_2.13.jar`.
+
+### 2. Bundle the jar into Python package data
+
+```bash
+python python/build_hooks/bundle_jars.py
+```
+This syncs the shaded jar into `python/pytest_spark_mutator/jars/` so the pytest plugin can resolve and mount it via `PYSPARK_SUBMIT_ARGS`.
+
+### 3. Install the Python plugin in development mode
+
+```bash
+pip install -e python/ --no-deps
+```
+
+### 4. Run tests and verification
+
+```bash
+# Run unit tests
+cd python && python -m pytest -v
+
+# Run end-to-end survival/kill verification on example pipeline
+python scripts/verify_e2e.py
+```
+
+> [!TIP]
+> On macOS with an active VPN or tunnel interface (e.g., Tailscale), set `SPARK_LOCAL_IP=127.0.0.1` so Spark binds local Netty RPC traffic directly to loopback.
 
 ---
 

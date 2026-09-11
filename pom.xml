@@ -5,11 +5,11 @@
   <modelVersion>4.0.0</modelVersion>
 
   <groupId>io.github.wpunit13</groupId>
-  <artifactId>spark-mutator-parent</artifactId>
+  <artifactId>spark-mutation-testing-parent</artifactId>
   <version>1.0.0-SNAPSHOT</version>
   <packaging>pom</packaging>
 
-  <name>spark-mutator (parent)</name>
+  <name>spark-mutation-testing (parent)</name>
   <description>
     Zero-touch semantic mutation testing engine for Apache Spark.
     Root aggregator. Declares every shared version and plugin configuration;
@@ -71,7 +71,7 @@
       <!-- Internal modules: version-free references everywhere else. -->
       <dependency>
         <groupId>io.github.wpunit13</groupId>
-        <artifactId>mutator-core</artifactId>
+        <artifactId>spark-mutation-testing-core</artifactId>
         <version>${project.version}</version>
       </dependency>
       <dependency>
