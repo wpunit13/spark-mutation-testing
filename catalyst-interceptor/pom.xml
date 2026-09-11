@@ -37,6 +37,7 @@
   <modules>
     <module>interceptor-api</module>
     <module>interceptor-dispatch</module>
+    <module>interceptor-spark-3.5_2.12</module>
     <module>interceptor-spark-3.5_2.13</module>
     <module>interceptor-runtime</module>
     <module>interceptor-bundle</module>
