@@ -1,4 +1,4 @@
-package io.github.wpunit13.mutator.spark35
+package io.github.wpunit13.mutator.spark35_212
 
 import io.github.wpunit13.mutator.api.{NodeCoordinateFactory, OperatorType, ShimMutationException, SparkShimVersion}
 import org.apache.spark.sql.{DataFrame, SparkSession}
@@ -15,7 +15,7 @@ class ShimImplSpec extends AnyFunSuite with BeforeAndAfterAll {
   private lazy val spark: SparkSession =
     SparkSession.builder()
       .master("local[1]")
-      .appName("ShimImplSpec")
+      .appName("ShimImplSpec212")
       .config("spark.sql.shuffle.partitions", "1")
       .config("spark.ui.enabled", "false")
       .getOrCreate()
@@ -76,8 +76,8 @@ class ShimImplSpec extends AnyFunSuite with BeforeAndAfterAll {
       .filter(col("st") === "OK" && col("amount") > 0)
   }
 
-  test("supportedVersion identifies the Spark 3.5 / Scala 2.13 cell") {
-    assert(shim.supportedVersion == SparkShimVersion("3.5", "2.13"))
+  test("supportedVersion identifies the Spark 3.5 / Scala 2.12 cell") {
+    assert(shim.supportedVersion == SparkShimVersion("3.5", "2.12"))
   }
 
   test("classify on an INNER Join node returns Join with exactly candidates 0, 1, 2") {
@@ -97,6 +97,33 @@ class ShimImplSpec extends AnyFunSuite with BeforeAndAfterAll {
     assert(sig.startsWith("INNER;"))
     val expectedCoord = NodeCoordinateFactory(2, OperatorType.Join, 0, sig)
     assert(candidates.forall(_.coordinate == expectedCoord))
+  }
+
+  test("golden NodeCoordinate hashes match standard test queries identically to Scala 2.13") {
+    // 1. Pinned specification golden fixture (ARCHITECTURE.md / README.md)
+    val pinnedCoord = NodeCoordinateFactory(2, OperatorType.Join, 0, "Inner;(customer_id#0 = customer_id#1)")
+    assert(pinnedCoord.toHex == "058a342dfabb7500")
+
+    // 2. Standard joined query
+    val joinNode = findJoin(joined())
+    val joinSig = shim.canonicalExprSig(joinNode, OperatorType.Join)
+    assert(joinSig == "INNER;(#0 = #2)")
+    val joinCoord = NodeCoordinateFactory(2, OperatorType.Join, 0, joinSig)
+    assert(joinCoord.toHex == "e9e480cd939740bc")
+
+    // 3. Standard AND-filtered query
+    val filterNode = findFilter(andFiltered())
+    val filterSig = shim.canonicalExprSig(filterNode, OperatorType.Filter)
+    assert(filterSig == "((#0 = 'COMPLETED') AND (#1 > 0))")
+    val filterCoord = NodeCoordinateFactory(1, OperatorType.Filter, 0, filterSig)
+    assert(filterCoord.toHex == "b8cdfda2300bd6af")
+
+    // 4. Standard single-filtered query
+    val singleNode = findFilter(singleFiltered())
+    val singleSig = shim.canonicalExprSig(singleNode, OperatorType.Filter)
+    assert(singleSig == "(#0 = 'COMPLETED')")
+    val singleCoord = NodeCoordinateFactory(1, OperatorType.Filter, 0, singleSig)
+    assert(singleCoord.toHex == "38559c33e748304c")
   }
 
   test("mutateJoin with mutationIndex 1 produces a conditionless Cross join") {

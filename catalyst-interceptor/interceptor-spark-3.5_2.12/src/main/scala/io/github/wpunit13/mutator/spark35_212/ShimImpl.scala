@@ -1,4 +1,4 @@
-package io.github.wpunit13.mutator.spark35
+package io.github.wpunit13.mutator.spark35_212
 
 import io.github.wpunit13.mutator.api._
 import org.apache.spark.sql.catalyst.expressions.{And, AttributeReference, Expression, Literal, Not}
@@ -7,7 +7,7 @@ import org.apache.spark.sql.catalyst.plans.logical.{Filter, Join, LogicalPlan}
 import org.apache.spark.sql.types.BooleanType
 
 /**
- * PlanMutatorShim implementation for the Spark 3.5.x / Scala 2.13 cell.
+ * PlanMutatorShim implementation for the Spark 3.5.x / Scala 2.12 cell.
  *
  * Instantiated via ServiceLoader, hence a plain class with a public no-arg
  * constructor (a Scala object would compile to a private-ctor singleton and
@@ -15,7 +15,7 @@ import org.apache.spark.sql.types.BooleanType
  */
 class ShimImpl extends PlanMutatorShim {
 
-  override val supportedVersion: SparkShimVersion = SparkShimVersion("3.5", "2.13")
+  override val supportedVersion: SparkShimVersion = SparkShimVersion("3.5", "2.12")
 
   override def classify(
     node: LogicalPlan,
@@ -150,7 +150,7 @@ class ShimImpl extends PlanMutatorShim {
     val ordinals: Map[Long, Int] =
       node.output.zipWithIndex.map { case (a, i) => a.exprId.id -> i }.toMap
 
-    val attrs: Seq[AttributeReference] =
+    val attrs: collection.Seq[AttributeReference] =
       expr.collect { case a: AttributeReference => a }.distinct
 
     if (attrs.isEmpty) {
