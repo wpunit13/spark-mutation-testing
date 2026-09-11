@@ -26,6 +26,8 @@ _KNOWN_KEYS = frozenset(
         "timeout_multiplier",
         "min_mutation_score",
         "output_dir",
+        "requeue_on_crash",
+        "control_channel_timeout_seconds",
     }
 )
 
@@ -39,6 +41,8 @@ class SparkMutatorConfig:
     timeout_multiplier: float = 2.0
     min_mutation_score: float = 80.0
     output_dir: str = "target/spark-mutator-reports"
+    requeue_on_crash: bool = False
+    control_channel_timeout_seconds: float = 5.0
 
     @classmethod
     def from_toml(cls, path) -> "SparkMutatorConfig":
@@ -94,6 +98,15 @@ class SparkMutatorConfig:
             )
         if "output_dir" in table:
             kwargs["output_dir"] = table["output_dir"]
+        if "requeue_on_crash" in table:
+            kwargs["requeue_on_crash"] = _coerce_bool(
+                "requeue_on_crash", table["requeue_on_crash"]
+            )
+        if "control_channel_timeout_seconds" in table:
+            kwargs["control_channel_timeout_seconds"] = _coerce_float(
+                "control_channel_timeout_seconds",
+                table["control_channel_timeout_seconds"],
+            )
 
         config = cls(**kwargs)
 
@@ -106,7 +119,21 @@ class SparkMutatorConfig:
                 f"min_mutation_score must be within [0, 100], "
                 f"got {config.min_mutation_score!r}"
             )
+        if config.control_channel_timeout_seconds <= 0:
+            raise ValueError(
+                f"control_channel_timeout_seconds must be > 0, "
+                f"got {config.control_channel_timeout_seconds!r}"
+            )
         return config
+
+
+def _coerce_bool(key: str, value) -> bool:
+    if isinstance(value, bool):
+        return value
+    raise ValueError(
+        f"invalid value for {key!r} in [tool.spark-mutator]: "
+        f"expected a boolean, got {type(value).__name__}"
+    )
 
 
 def _coerce_float(key: str, value) -> float:

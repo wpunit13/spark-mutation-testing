@@ -30,6 +30,7 @@ class MutatorSparkExtension extends (SparkSessionExtensions => Unit) {
     // cost-based join reordering in Spark 3.5.x, satisfying §3.2: Discovery
     // sees the fully resolved analyzed plan, and a mutated Join type is still
     // subject to normal join-strategy selection afterward.
+    DriverFatalShutdownHook.register()
     extensions.injectOptimizerRule(_ => new CatalystMutationRule(ShimDispatcher.activeShim))
   }
 }

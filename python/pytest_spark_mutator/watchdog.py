@@ -166,9 +166,9 @@ def escalate_cancellation(
         if not job_ids:
             return "TIMED_OUT"
 
-    # TODO(spec): stage 4 (process-level circuit breaker / force-kill of the
-    # child JVM) is deliberately not implemented here and is owned by a
-    # future task; callers should treat DriverUnresponsiveError as ERRORED.
+    # Stage 4 (driver-resilience circuit breaker) is implemented in
+    # session_driver.SessionDriver; callers should treat DriverUnresponsiveError
+    # as the trigger that trips the breaker, which classifies the mutant ERRORED.
     raise DriverUnresponsiveError(
         f"job group {job_group_id!r} remained active past the hard ceiling; "
         f"still-active job ids: {job_ids}"

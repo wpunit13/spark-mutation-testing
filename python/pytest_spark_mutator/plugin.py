@@ -27,8 +27,18 @@ import time
 
 import pytest
 
+from py4j.protocol import Py4JNetworkError
+
 from .bridge import MutatorBridge
 from .config import SparkMutatorConfig
+from .session_driver import (
+    DriverFailure,
+    GatewayUnresponsiveError,
+    SessionDriver,
+    handle_breaker,
+    read_sentinel_file,
+    with_control_timeout,
+)
 from .session_manager import get_jvm, get_or_create_session
 from .version_detect import resolve_shim_jar_filename
 from .watchdog import DriverUnresponsiveError, Watchdog, escalate_cancellation
@@ -192,6 +202,9 @@ def pytest_sessionfinish(session, exitstatus) -> None:
         print(f"spark-mutator: mutation loop failed: {type(exc).__name__}: {exc}")
         session.exitstatus = pytest.ExitCode.INTERNAL_ERROR
         return
+    if getattr(mut_session.driver, "exit_nonzero", False):
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
+        return
     if score < mut_session.config.min_mutation_score:
         print(
             f"spark-mutator: mutation score {score:.1f}% is below "
@@ -263,9 +276,13 @@ class _MutationSession:
 
     def __init__(self, config: SparkMutatorConfig):
         self.config = config
-        self._spark = None
-        self._jvm = None
+        self.driver = SessionDriver(
+            config,
+            session_creator=lambda cfg: get_or_create_session(cfg),
+            jvm_accessor=lambda spk: get_jvm(spk),
+        )
         self._bridge = None
+        self._bridge_epoch = -1
         self.baseline_elapsed: dict[str, float] = {}
         self.baseline_failed = False
         self.phase = "baseline"
@@ -283,20 +300,17 @@ class _MutationSession:
 
     @property
     def spark(self):
-        if self._spark is None:
-            self._spark = get_or_create_session(self.config)
-        return self._spark
+        return self.driver.get_session()
 
     @property
     def jvm(self):
-        if self._jvm is None:
-            self._jvm = get_jvm(self.spark)
-        return self._jvm
+        return self.driver.get_jvm()
 
     @property
     def bridge(self) -> MutatorBridge:
-        if self._bridge is None:
+        if self._bridge is None or self._bridge_epoch != self.driver.epoch:
             self._bridge = MutatorBridge(self.jvm)
+            self._bridge_epoch = self.driver.epoch
         return self._bridge
 
     # -- raw JVM access ----------------------------------------------------
@@ -318,17 +332,62 @@ class _MutationSession:
         """Run every non-excluded mutant; returns the mutation score."""
         bridge = self.bridge
         catalog = bridge.get_full_catalog()
+        driver = self.driver
+        config = self.config
+
+        survivors = []
         for entry in catalog:
             mutator_name = _mutator_name_for(entry)
-            if mutator_name in self.config.excluded_mutators:
+            if mutator_name in config.excluded_mutators:
                 logger.debug(
                     "spark-mutator: excluding %s (mutant %s)",
                     mutator_name,
                     entry["mutantId"],
                 )
                 continue
-            self._evaluate_mutant(entry["mutantId"], mutator_name)
-        report_path = bridge.finalize_reports()
+            survivors.append((entry["mutantId"], mutator_name))
+
+        def _handle_breaker(driver, config, mutant, failure):
+            return handle_breaker(
+                driver,
+                config,
+                mutant,
+                failure,
+                bridge=self.bridge,
+                remaining=remaining_mutants,
+                results=self.results,
+            )
+
+        for idx, (mutant, mutator_name) in enumerate(survivors):
+            remaining_mutants = [m[0] for m in survivors[idx + 1:]]
+            try:
+                self._evaluate_mutant(mutant, mutator_name)
+            except DriverUnresponsiveError as e:          # signal A (stage 3)
+                aborted = _handle_breaker(driver, config, mutant, DriverFailure(
+                    "driver_watchdog_force_kill", "stage3_timeout", mutant, str(e)))
+                if aborted:
+                    break
+            except GatewayUnresponsiveError as e:         # signal B
+                aborted = _handle_breaker(driver, config, mutant, DriverFailure(
+                    "gateway_unresponsive", "control_channel_timeout", mutant, str(e)))
+                if aborted:
+                    break
+            except Py4JNetworkError as e:                 # signal C (network drop)
+                trigger = "network_drop"
+                detail = str(e)
+                sentinel = read_sentinel_file()
+                if sentinel:
+                    trigger = "sentinel"
+                    detail = f"{detail}; fatal JVM error: {sentinel.get('reason')}: {sentinel.get('message')}"
+                aborted = _handle_breaker(driver, config, mutant, DriverFailure(
+                    "driver_crash", trigger, mutant, detail))
+                if aborted:
+                    break
+
+        if not driver.exit_nonzero:
+            report_path = self.bridge.finalize_reports()
+        else:
+            report_path = getattr(driver, "report_path", None) or "target/spark-mutator-reports"
         return self._print_summary(report_path)
 
     def _evaluate_mutant(self, mutant_id: str, mutator_name: str) -> None:
@@ -361,6 +420,9 @@ class _MutationSession:
             else:
                 needs_reset = True
                 status, failure_detail = self._run_mutant(mutant_id, mapped)
+        except (DriverUnresponsiveError, GatewayUnresponsiveError, Py4JNetworkError):
+            needs_reset = False
+            raise
         except Exception as exc:
             # One bad mutant must not abort the run.
             status = "ERRORED"
@@ -368,7 +430,10 @@ class _MutationSession:
             logger.exception("spark-mutator: mutant %s (%s) errored", mutant_id, mutator_name)
         finally:
             if needs_reset:
-                reset_error = self._run_reset_sequence(mutant_id)
+                try:
+                    reset_error = self._run_reset_sequence(mutant_id)
+                except (DriverUnresponsiveError, GatewayUnresponsiveError, Py4JNetworkError):
+                    raise
         elapsed = time.perf_counter() - start
         if needs_reset and reset_error is not None and status != "TIMED_OUT":
             status = "ERRORED"
@@ -412,6 +477,8 @@ class _MutationSession:
                     break
         finally:
             self.watchdog.disarm()
+        if self.driver_unresponsive_error is not None:
+            raise self.driver_unresponsive_error
         return self._classify_mutant(deadline)
 
     def _classify_mutant(self, deadline: float) -> tuple:
@@ -454,16 +521,26 @@ class _MutationSession:
         are logged and returned, never raised.
         """
         error = None
+        timeout = getattr(self.config, "control_channel_timeout_seconds", 5.0)
         try:
-            self.spark.sparkContext.clearJobGroup()
+            with_control_timeout(
+                self.spark.sparkContext.clearJobGroup, timeout_seconds=timeout
+            )
+        except (DriverUnresponsiveError, GatewayUnresponsiveError, Py4JNetworkError):
+            raise
         except Exception:
             logger.exception(
                 "spark-mutator: clearJobGroup failed for mutant %s", mutant_id
             )
         try:
-            self.bridge.reset_session_state(
-                self.spark._jsparkSession, self.baseline_start_epoch_ms
+            with_control_timeout(
+                lambda: self.bridge.reset_session_state(
+                    self.spark._jsparkSession, self.baseline_start_epoch_ms
+                ),
+                timeout_seconds=timeout,
             )
+        except (DriverUnresponsiveError, GatewayUnresponsiveError, Py4JNetworkError):
+            raise
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
             logger.exception(
@@ -471,7 +548,12 @@ class _MutationSession:
             )
         try:
             # Must be LAST (§3.2).
-            self.bridge.clear_active_mutant(mutant_id)
+            with_control_timeout(
+                lambda: self.bridge.clear_active_mutant(mutant_id),
+                timeout_seconds=timeout,
+            )
+        except (DriverUnresponsiveError, GatewayUnresponsiveError, Py4JNetworkError):
+            raise
         except Exception:
             logger.exception(
                 "spark-mutator: clear_active_mutant failed for mutant %s", mutant_id
