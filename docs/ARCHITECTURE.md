@@ -32,8 +32,8 @@ is left open, it is explicitly marked `[OPEN]`; everything else is fixed.
         │                          catalyst-interceptor (Scala)                        │
         │  ┌──────────────────────────────┐                                            │
         │  │        interceptor-api        │  Spark-agnostic SPI:                      │
-        │  │  PlanMutatorShim · NodeCoord   │  OperatorType enum, Mutation ADTs,        │
-        │  │  OperatorType · MutationDefs   │  SparkShimVersion                         │
+        │  │  PlanMutatorShim · NodeCoordinate │ OperatorType, MutationCandidate,           │
+        │  │  OperatorType · MutationCandidate │  SparkShimVersion                          │
         │  └───────────────▲────────────────┘                                            │
         │                  │ implements                                                 │
         │   ┌──────────────┼──────────────┬──────────────────┬────────────────────┐     │
@@ -390,9 +390,11 @@ catalyst-interceptor/
 ├── interceptor-api/                     # Scala, cross-built 2.12 & 2.13
 │   ├── src/main/scala/.../OperatorType.scala
 │   ├── src/main/scala/.../NodeCoordinate.scala
+│   ├── src/main/scala/.../NodeCoordinateFactory.scala
 │   ├── src/main/scala/.../PlanMutatorShim.scala
-│   ├── src/main/scala/.../SparkShimVersion.scala
-│   └── src/main/scala/.../mutation/*.scala        # JoinMutation, FilterMutation, etc. ADTs
+│   ├── src/main/scala/.../MutationCandidate.scala
+│   ├── src/main/scala/.../ShimMutationException.scala
+│   └── src/main/scala/.../SparkShimVersion.scala
 ├── interceptor-dispatch/                # Scala, ServiceLoader-based runtime dispatcher
 │   └── src/main/scala/.../ShimDispatcher.scala
 ├── interceptor-spark-3.4_2.12/
@@ -425,12 +427,15 @@ simultaneously so the Python wheel can bundle all of them. Each such module:
 - Depends on `spark-catalyst_<scala>` and `spark-sql_<scala>` at `provided`
   scope (never shaded — these come from the consumer's classpath at runtime).
 - Depends on `interceptor-api` at `compile` scope.
-- Uses `maven-shade-plugin` to produce a **thin** shaded artifact containing
-  only its own compiled classes plus `interceptor-api`'s classes (relocated
-  under a per-module package prefix, e.g. `shaded.spark35_213.*`, to prevent
-  classloader collisions when multiple shim JARs are simultaneously present
-  on one classpath — see Risk Register #7) — it explicitly does **not**
-  shade Spark itself.
+- Produces a **plain thin jar** (its own compiled classes plus the
+  `META-INF/services` entry) — the shim module itself does **not** shade or
+  relocate. The single fat jar is assembled by a separate leaf
+  `interceptor-bundle-*` module that shades `mutator-core`, `interceptor-api`,
+  `interceptor-dispatch`, `interceptor-runtime`, and the shim together, with
+  package relocation **deliberately disabled**: relocating
+  `io.github.wpunit13.mutator.api` would rename the `PlanMutatorShim` interface
+  that `ServiceLoader` matches and the class named in `spark.sql.extensions`,
+  so the shim would no longer be discoverable. Spark itself is never shaded.
 - Registers its `PlanMutatorShim` implementation via
   `META-INF/services/io.github.wpunit13.mutator.api.PlanMutatorShim`
   (Java `ServiceLoader` convention) so `interceptor-dispatch` can discover it
@@ -483,7 +488,7 @@ which both packaging paths require.
    `org.apache.spark:spark-sql_<scala_ver>:<version>` artifact coordinate
    actually present.
 2. It maps `<version>_<scala_ver>` to the corresponding
-   `io.github.wpunit13:catalyst-interceptor-spark-<major.minor>_<scala_ver>`
+   `io.github.wpunit13:interceptor-spark-<major.minor>_<scala_ver>`
    artifact coordinate (patch version of the interceptor artifact tracks
    `spark-mutator`'s own release, not the user's Spark patch version — the
    shim only needs to match at the `<major.minor>_<scala>` granularity).

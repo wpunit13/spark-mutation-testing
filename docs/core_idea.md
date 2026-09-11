@@ -1,5 +1,11 @@
 # Project Specification: Spark Semantic Mutation Testing Engine (`spark-mutator`)
 
+> **Note:** This is the *target* specification — the full vision and requirements,
+> not the current state. See the [README](../README.md) for what is implemented
+> today (PySpark on Spark 3.5.x with Join and Filter mutators). The
+> aggregate/window/null mutators and the Java/Scala Maven path are delivered in
+> later phases.
+
 ## 1. Overview & Problem Statement
 Traditional mutation testing tools (like PIT) operate on JVM bytecode and cannot evaluate distributed query semantics, while standard test suites often pass despite lacking coverage for join edge cases, filter drops, or window boundary changes. 
 
@@ -152,7 +158,7 @@ To prevent maintenance sprawl and bloated dependencies, the project enforces a s
 
 #### JVM / Maven & Gradle Pipelines (`spark-mutator-maven-plugin`)
 * **Classpath Introspection:** The Maven plugin resolves the exact `org.apache.spark:spark-sql_<scala_ver>` dependency version present on the target project's test classpath.
-* **Transitive Attachment:** It dynamically attaches the matching `catalyst-interceptor-spark-<spark_ver>_<scala_ver>` artifact to Surefire/Failsafe runtime arguments without requiring manual configuration in the user's `../pom.xml`.
+* **Transitive Attachment:** It dynamically attaches the matching `interceptor-spark-<spark_ver>_<scala_ver>` artifact to Surefire/Failsafe runtime arguments without requiring manual configuration in the user's `../pom.xml`.
 
 ---
 
@@ -161,7 +167,7 @@ Adding support for a newly released Apache Spark version must strictly follow th
 
 1. Create a new module: `catalyst-interceptor/interceptor-spark-<major.minor>_<scala_ver>/`.
 2. Implement `PlanMutatorShim` matching the new AST case class constructors.
-3. Append the new version string to the supported runtime matrix in `pytest_spark_mutator/plugin.py`.
+3. Append the new version string to the supported runtime matrix in `pytest_spark_mutator/version_detect.py`.
 4. Add the version target to the CI matrix test suite.
 
 ---
