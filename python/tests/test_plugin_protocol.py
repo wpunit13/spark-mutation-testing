@@ -126,6 +126,7 @@ def mutator_fakes(monkeypatch, tmp_path):
         importlib.resources, "files", lambda package: _FakeJarTraversable()
     )
     monkeypatch.delenv("PYSPARK_SUBMIT_ARGS", raising=False)
+    monkeypatch.delenv("SPARK_MUTATOR_OUTPUT_DIR", raising=False)
     return fake
 
 
@@ -193,6 +194,7 @@ def test_inactive_run_is_a_total_no_op(pytester, mutator_fakes, monkeypatch):
     assert result.ret == 0
     # No env var writes...
     assert "PYSPARK_SUBMIT_ARGS" not in os.environ
+    assert "SPARK_MUTATOR_OUTPUT_DIR" not in os.environ
     # ...no bridge calls at all...
     assert mutator_fakes.events == []
     # ...and no spark-mutator output.
@@ -262,6 +264,26 @@ def test_baseline_success_runs_every_mutant(pytester, mutator_fakes, monkeypatch
     tracker = mutator_fakes.jvm.io.github.wpunit13.mutator.TestContextTracker
     assert tracker.setCurrentTestId.call_count == 1
     assert tracker.clearCurrentTestId.call_count == 1
+
+
+def test_output_dir_config_is_propagated_to_json_sink(
+    pytester, mutator_fakes, monkeypatch
+):
+    pytester.makepyfile(test_app="def test_alpha():\n    assert True\n")
+    config_path = _write_config(
+        pytester, 'output_dir = "target/custom-out"\nmin_mutation_score = 0.0\n'
+    )
+    mutator_fakes.bridge.catalog = [_entry(MUTANT_A, "JOIN", 0)]
+    mutator_fakes.bridge.mapped_tests = {MUTANT_A: ["test_app.py::test_alpha"]}
+    result = _run_nested(
+        pytester,
+        monkeypatch,
+        "--spark-mutate",
+        "--spark-mutate-config",
+        str(config_path),
+    )
+    assert result.ret == 0
+    assert os.environ["SPARK_MUTATOR_OUTPUT_DIR"] == "target/custom-out"
 
 
 def test_submit_args_prepended_and_single_trailing_shell_token(

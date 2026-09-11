@@ -1,0 +1,3 @@
+[tool.spark-mutator]
+output_dir = "target/weak-reports"
+min_mutation_score = 80.0

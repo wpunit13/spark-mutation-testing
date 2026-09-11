@@ -99,14 +99,14 @@ class ShimImplSpec extends AnyFunSuite with BeforeAndAfterAll {
     assert(candidates.forall(_.coordinate == expectedCoord))
   }
 
-  test("mutateJoin with mutationIndex 1 produces a Cross join, keeping the condition") {
+  test("mutateJoin with mutationIndex 1 produces a conditionless Cross join") {
     val joinNode = findJoin(joined())
     val mutated = shim.mutateJoin(joinNode, 1).asInstanceOf[Join]
     assert(mutated.joinType == Cross)
-    // Cross-with-condition is legal in Spark 3.5.x (verified against the
-    // 3.5.3 sources: AstBuilder maps `CROSS JOIN ... ON <expr>` to exactly
-    // this shape), so the original condition is preserved by copy.
-    assert(mutated.condition == joinNode.condition)
+    // INNER -> CROSS must drop the join predicate to produce a true Cartesian
+    // product; retaining it would keep the join semantically identical to the
+    // original Inner join and render the mutation a no-op.
+    assert(mutated.condition.isEmpty)
     assert(mutated.left == joinNode.left)
     assert(mutated.right == joinNode.right)
   }

@@ -80,15 +80,20 @@ public final class MutantRegistry {
                     "mutantId must be a non-null, non-blank 16-char lowercase hex string, got: "
                             + mutantId);
         }
-        if (!state.compareAndSet(mutantId, null)) {
+        while (true) {
             String current = state.get();
             if (current == null) {
                 throw new IllegalStateException(
                         "Registry is IDLE; cannot clear mutant id '" + mutantId + "'.");
             }
-            throw new IllegalStateException(
-                    "Expected to clear mutant id '" + mutantId + "' but registry is ACTIVE for '"
-                            + current + "'.");
+            if (!current.equals(mutantId)) {
+                throw new IllegalStateException(
+                        "Expected to clear mutant id '" + mutantId + "' but registry is ACTIVE for '"
+                                + current + "'.");
+            }
+            if (state.compareAndSet(current, null)) {
+                break;
+            }
         }
     }
 

@@ -94,6 +94,12 @@ def pytest_configure(config) -> None:
     mutator_config = SparkMutatorConfig.from_toml(
         config.getoption("--spark-mutate-config")
     )
+    # Propagate output_dir to the JVM-side ReportSink, which resolves it from
+    # SPARK_MUTATOR_OUTPUT_DIR (then the spark.mutator.output.dir system
+    # property, then a default). Set it before the gateway JVM is lazily
+    # launched, so the child process inherits it. Without this, the config's
+    # output_dir was effectively ignored.
+    os.environ["SPARK_MUTATOR_OUTPUT_DIR"] = mutator_config.output_dir
     # UnsupportedSparkVersionError deliberately propagates: pytest aborts with
     # that message, which is exactly the required fast-fail guard.
     jar_filename = resolve_shim_jar_filename()

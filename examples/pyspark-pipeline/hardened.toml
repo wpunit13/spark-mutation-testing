@@ -1,0 +1,3 @@
+[tool.spark-mutator]
+output_dir = "target/hardened-reports"
+min_mutation_score = 0.0

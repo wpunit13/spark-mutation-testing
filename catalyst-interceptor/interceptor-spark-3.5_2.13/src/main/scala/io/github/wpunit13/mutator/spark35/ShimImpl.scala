@@ -62,24 +62,19 @@ class ShimImpl extends PlanMutatorShim {
 
   override def mutateJoin(node: LogicalPlan, mutationIndex: Int): LogicalPlan = node match {
     case j: Join =>
-      val target: JoinType = mutationIndex match {
-        case 0 => LeftOuter
-        case 1 => Cross
-        case 2 => LeftAnti
+      mutationIndex match {
+        case 0 => j.copy(joinType = LeftOuter)
+        case 1 =>
+          // INNER -> CROSS relaxes the join to a true Cartesian product, so the
+          // join predicate is dropped. Keeping it would make `CROSS JOIN ... ON
+          // <equality>` semantically identical to the Inner join it replaced,
+          // turning the mutation into a no-op with zero killing power for any
+          // conditioned join.
+          j.copy(joinType = Cross, condition = None)
+        case 2 => j.copy(joinType = LeftAnti)
         case other => throw new ShimMutationException(
           s"Unknown join mutationIndex $other; expected 0, 1 or 2")
       }
-      // Cross-with-condition legality (verified against the Spark 3.5.3 sources
-      // jar in the local repository, spark-catalyst_2.13-3.5.3-sources.jar):
-      //  1. basicLogicalOperators.scala — the Join case class has no require()
-      //     tying Cross to condition = None;
-      //  2. analysis/CheckAnalysis.scala — the only join-condition check is
-      //     JOIN_CONDITION_IS_NOT_BOOLEAN_TYPE; no Cross-specific rejection;
-      //  3. parser/AstBuilder.withJoinRelation — `CROSS JOIN ... ON <expr>` is
-      //     mapped directly to Join(..., Cross, Some(condition), JoinHint.NONE),
-      //     so the parser itself produces condition-bearing Cross joins.
-      // The condition is therefore kept as-is for all three targets.
-      j.copy(joinType = target)
 
     case other => throw new ShimMutationException(
       s"mutateJoin expects a Join node but found ${other.getClass.getName}")

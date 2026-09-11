@@ -1,0 +1,15 @@
+[project]
+name = "pyspark-pipeline"
+version = "0.1.0"
+requires-python = ">=3.9"
+dependencies = [
+    "pyspark>=3.5,<3.6",
+]
+
+[tool.spark-mutator]
+output_dir = "target/spark-mutator-reports"
+min_mutation_score = 0.0
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
