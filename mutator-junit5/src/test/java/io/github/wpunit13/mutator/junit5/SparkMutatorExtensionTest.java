@@ -63,7 +63,7 @@ class SparkMutatorExtensionTest {
         System.clearProperty(SparkMutatorExtension.PROPERTY_ACTIVE_MUTANT);
         System.clearProperty(SparkMutatorExtension.PROPERTY_MUTATOR_DISABLED);
         System.clearProperty(SparkMutatorExtension.PROPERTY_MUTATOR_ENABLED);
-        System.setProperty("spark.mutator.output.dir", tempDir.toAbsolutePath().toString());
+        System.setProperty("spark.mutator.outputDirectory", tempDir.toAbsolutePath().toString());
     }
 
     @AfterEach
@@ -74,7 +74,7 @@ class SparkMutatorExtensionTest {
         System.clearProperty(SparkMutatorExtension.PROPERTY_ACTIVE_MUTANT);
         System.clearProperty(SparkMutatorExtension.PROPERTY_MUTATOR_DISABLED);
         System.clearProperty(SparkMutatorExtension.PROPERTY_MUTATOR_ENABLED);
-        System.clearProperty("spark.mutator.output.dir");
+        System.clearProperty("spark.mutator.outputDirectory");
     }
 
     // -----------------------------------------------------------------------
@@ -199,7 +199,7 @@ class SparkMutatorExtensionTest {
 
     @Test
     void defaultOutputDirGeneratesMutationReport() {
-        System.clearProperty("spark.mutator.output.dir");
+        System.clearProperty("spark.mutator.outputDirectory");
         LauncherDiscoveryRequest request = LauncherDiscoveryRequestBuilder.request()
                 .selectors(DiscoverySelectors.selectClass(HardenedPipelineTestCase.class))
                 .build();

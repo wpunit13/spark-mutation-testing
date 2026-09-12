@@ -1,14 +1,13 @@
 package io.github.wpunit13.mutator.report;
 
+import io.github.wpunit13.mutator.MutantBootstrap;
 import io.github.wpunit13.mutator.catalog.MutationCatalogAccess;
-import io.github.wpunit13.mutator.model.MutantMetadata;
 import io.github.wpunit13.mutator.model.MutantResult;
 import io.github.wpunit13.mutator.model.MutantStatus;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.util.Collection;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -18,7 +17,6 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public final class ReportSink {
 
-    private static final String NO_OUTCOME_DETAIL = "no outcome recorded; run terminated early";
 
     private final Map<String, MutantResult> results = new ConcurrentHashMap<>();
 
@@ -89,36 +87,24 @@ public final class ReportSink {
      */
     public static String finalizeAndWriteReports() {
         Path outputDir = resolveOutputDir();
-        Map<String, MutantResult> working = instance().results;
-        // Every catalogued mutant with no recorded result is synthesized as
-        // ERRORED so the written schema never carries a null result object.
-        for (MutantMetadata meta : MutationCatalogAccess.allEntries()) {
-            working.putIfAbsent(
-                    meta.getMutantId(),
-                    new MutantResult(
-                            meta.getMutantId(),
-                            MutantStatus.ERRORED,
-                            0L,
-                            NO_OUTCOME_DETAIL,
-                            System.currentTimeMillis()));
-        }
-        Collection<MutantMetadata> catalog = MutationCatalogAccess.allEntries();
-        Map<String, MutantResult> snapshot = Map.copyOf(working);
-        Path jsonPath;
-        try {
-            Path json = JsonReportWriter.write(outputDir, catalog, snapshot);
-            SarifReportWriter.write(outputDir, catalog, snapshot);
-            HtmlReportWriter.write(outputDir, catalog, snapshot);
-            jsonPath = json;
-        } catch (IOException e) {
-            throw new IllegalStateException("Failed to write reports to " + outputDir, e);
-        }
-        return jsonPath.toAbsolutePath().toString();
+        return ReportWriter.writeReports(
+                outputDir,
+                MutationCatalogAccess.allEntries(),
+                Map.copyOf(instance().results));
     }
 
     /** Read accessor used by the report writers. */
     static Map<String, MutantResult> snapshotResults() {
         return Map.copyOf(instance().results);
+    }
+
+    /**
+     * Computes the mutation score from the in-memory catalog + recorded
+     * outcomes. Convenience for in-process callers (the JUnit5 extension) that
+     * need to apply a {@code minMutationScore} gate without reading the report.
+     */
+    public static double computeMutationScore() {
+        return ReportWriter.computeScore(MutationCatalogAccess.allEntries(), snapshotResults());
     }
 
     /** Test-only reset; clears every recorded outcome. */
@@ -127,7 +113,7 @@ public final class ReportSink {
     }
 
     private static Path resolveOutputDir() {
-        String configured = System.getProperty("spark.mutator.output.dir");
+        String configured = System.getProperty(MutantBootstrap.PROP_OUTPUT_DIRECTORY);
         if (configured == null || configured.isBlank()) {
             configured = System.getenv("SPARK_MUTATOR_OUTPUT_DIR");
         }

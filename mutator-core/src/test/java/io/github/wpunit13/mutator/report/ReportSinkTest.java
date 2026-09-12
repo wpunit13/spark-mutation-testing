@@ -17,7 +17,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 class ReportSinkTest {
 
-    private static final String OUTPUT_DIR_PROPERTY = "spark.mutator.output.dir";
+    private static final String OUTPUT_DIR_PROPERTY = "spark.mutator.outputDirectory";
     private final ObjectMapper mapper = new ObjectMapper();
 
     @TempDir

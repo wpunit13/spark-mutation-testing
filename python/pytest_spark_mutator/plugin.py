@@ -105,7 +105,7 @@ def pytest_configure(config) -> None:
         config.getoption("--spark-mutate-config")
     )
     # Propagate output_dir to the JVM-side ReportSink, which resolves it from
-    # SPARK_MUTATOR_OUTPUT_DIR (then the spark.mutator.output.dir system
+    # SPARK_MUTATOR_OUTPUT_DIR (then the spark.mutator.outputDirectory system
     # property, then a default). Set it before the gateway JVM is lazily
     # launched, so the child process inherits it. Without this, the config's
     # output_dir was effectively ignored.

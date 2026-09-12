@@ -2,7 +2,9 @@ package io.github.wpunit13.mutator.maven;
 
 import org.apache.maven.execution.MavenSession;
 import org.apache.maven.plugin.AbstractMojo;
+import org.apache.maven.plugin.BuildPluginManager;
 import org.apache.maven.plugin.MojoExecutionException;
+import org.apache.maven.plugin.MojoFailureException;
 import org.apache.maven.plugins.annotations.Component;
 import org.apache.maven.plugins.annotations.LifecyclePhase;
 import org.apache.maven.plugins.annotations.Mojo;
@@ -26,8 +28,8 @@ import java.io.File;
  * <p>Introspects the target project's resolved test classpath to determine the exact
  * {@code org.apache.spark:spark-sql_<scala_ver>:<version>} in use, resolves the matching
  * {@code io.github.wpunit13:interceptor-spark-<major.minor>_<scala_ver>} artifact via the
- * Maven Resolver (Aether) API, and configures Surefire's {@code argLine} and
- * {@code additionalClasspathElements}.
+ * Maven Resolver (Aether) API, configures Surefire's {@code argLine} and
+ * {@code additionalClasspathElements}, and orchestrates the baseline/mutation loop.
  */
 @Mojo(
         name = "mutate",
@@ -38,6 +40,9 @@ public class MutateMojo extends AbstractMojo {
 
     @Component
     private RepositorySystem repoSystem;
+
+    @Component
+    private BuildPluginManager pluginManager;
 
     @Parameter(defaultValue = "${project}", readonly = true, required = true)
     private MavenProject project;
@@ -51,8 +56,20 @@ public class MutateMojo extends AbstractMojo {
     @Parameter(defaultValue = "${plugin.version}", readonly = true)
     private String pluginVersion;
 
+    @Parameter(property = "spark.mutator.outputDirectory", defaultValue = "${project.build.directory}/spark-mutator-reports")
+    private File outputDirectory;
+
+    @Parameter(property = "spark.mutator.timeoutMultiplier", defaultValue = "2.0")
+    private double timeoutMultiplier = 2.0;
+
+    @Parameter(property = "spark.mutator.minMutationScore", defaultValue = "0.0")
+    private double minMutationScore = 0.0;
+
+    private MutationLoopCoordinator coordinator;
+    private SurefireExecutor surefireExecutor;
+
     @Override
-    public void execute() throws MojoExecutionException {
+    public void execute() throws MojoExecutionException, MojoFailureException {
         if (project == null) {
             throw new MojoExecutionException("MavenProject cannot be null");
         }
@@ -113,6 +130,57 @@ public class MutateMojo extends AbstractMojo {
         getLog().info("Configured Surefire argLine: " + configResult.getArgLine());
         getLog().info("Configured Surefire additionalClasspathElements: "
                 + configResult.getAdditionalClasspathElements());
+
+        // 5. Execute Mutation Loop
+        if (coordinator == null && pluginManager == null && surefireExecutor == null) {
+            getLog().warn("BuildPluginManager is null; skipping mutation loop execution.");
+            return;
+        }
+
+        File reportsDir = outputDirectory;
+        if (reportsDir == null) {
+            if (project.getBuild() != null && project.getBuild().getDirectory() != null) {
+                reportsDir = new File(project.getBuild().getDirectory(), "spark-mutator-reports");
+            } else {
+                reportsDir = new File("target", "spark-mutator-reports");
+            }
+        }
+
+        MutationLoopCoordinator effectiveCoordinator = coordinator;
+        if (effectiveCoordinator == null) {
+            SurefireExecutor executor = surefireExecutor != null
+                    ? surefireExecutor
+                    : new SurefireExecutor(pluginManager, mavenSession, project);
+            effectiveCoordinator = new MutationLoopCoordinator(
+                    executor,
+                    timeoutMultiplier,
+                    reportsDir,
+                    minMutationScore
+            );
+        }
+
+        MutationLoopCoordinator.MutationLoopResult loopResult;
+        try {
+            loopResult = effectiveCoordinator.execute();
+        } catch (MojoFailureException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new MojoExecutionException("Mutation testing execution failed: " + e.getMessage(), e);
+        }
+
+        getLog().info("Mutation testing finished: "
+                + loopResult.getKilled() + " killed, "
+                + loopResult.getSurvived() + " survived, "
+                + loopResult.getTimedOut() + " timed out, "
+                + loopResult.getErrored() + " errored. "
+                + "Mutation score: " + loopResult.getMutationScore() + "%");
+        getLog().info("Reports written to: " + loopResult.getReportPath());
+
+        if (minMutationScore > 0.0 && loopResult.getMutationScore() < minMutationScore) {
+            throw new MojoFailureException(
+                    "Mutation score (" + loopResult.getMutationScore()
+                            + "%) is below minimum threshold (" + minMutationScore + "%).");
+        }
     }
 
     void setRepositorySystem(RepositorySystem repoSystem) {
@@ -135,11 +203,59 @@ public class MutateMojo extends AbstractMojo {
         this.pluginVersion = pluginVersion;
     }
 
+    void setPluginManager(BuildPluginManager pluginManager) {
+        this.pluginManager = pluginManager;
+    }
+
+    void setOutputDirectory(File outputDirectory) {
+        this.outputDirectory = outputDirectory;
+    }
+
+    void setTimeoutMultiplier(double timeoutMultiplier) {
+        this.timeoutMultiplier = timeoutMultiplier;
+    }
+
+    void setMinMutationScore(double minMutationScore) {
+        this.minMutationScore = minMutationScore;
+    }
+
+    void setCoordinator(MutationLoopCoordinator coordinator) {
+        this.coordinator = coordinator;
+    }
+
+    void setSurefireExecutor(SurefireExecutor surefireExecutor) {
+        this.surefireExecutor = surefireExecutor;
+    }
+
     RepositorySystem getRepositorySystem() {
         return repoSystem;
     }
 
+    BuildPluginManager getPluginManager() {
+        return pluginManager;
+    }
+
     MavenProject getProject() {
         return project;
+    }
+
+    File getOutputDirectory() {
+        return outputDirectory;
+    }
+
+    double getTimeoutMultiplier() {
+        return timeoutMultiplier;
+    }
+
+    double getMinMutationScore() {
+        return minMutationScore;
+    }
+
+    MutationLoopCoordinator getCoordinator() {
+        return coordinator;
+    }
+
+    SurefireExecutor getSurefireExecutor() {
+        return surefireExecutor;
     }
 }

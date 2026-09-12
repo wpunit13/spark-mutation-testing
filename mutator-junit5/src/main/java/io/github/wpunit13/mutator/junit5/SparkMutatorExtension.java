@@ -2,14 +2,17 @@ package io.github.wpunit13.mutator.junit5;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.wpunit13.mutator.MutantBootstrap;
 import io.github.wpunit13.mutator.MutantRegistry;
 import io.github.wpunit13.mutator.catalog.MutationCatalogAccess;
+import io.github.wpunit13.mutator.catalog.MutationCatalogIo;
 import io.github.wpunit13.mutator.report.ReportSink;
 import io.github.wpunit13.mutator.reset.SessionResetFacade;
 
 import java.lang.reflect.Constructor;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -111,10 +114,7 @@ public class SparkMutatorExtension implements
         }
         ensureSparkExtensionActive();
 
-        String activeMutantProp = System.getProperty(PROPERTY_ACTIVE_MUTANT);
-        if (activeMutantProp != null && !activeMutantProp.isBlank()) {
-            MutantRegistry.getInstance().setActiveMutant(activeMutantProp.trim());
-        }
+        MutantBootstrap.activateFromSystemProperties();
 
         boolean isBaseline = (MutantRegistry.getInstance().getActiveMutantOrNull() == null);
         getStore(context).put("baselineMode", isBaseline);
@@ -127,11 +127,7 @@ public class SparkMutatorExtension implements
             return;
         }
 
-        String activeMutantProp = System.getProperty(PROPERTY_ACTIVE_MUTANT);
-        if (activeMutantProp != null && !activeMutantProp.isBlank()
-                && MutantRegistry.getInstance().getActiveMutantOrNull() == null) {
-            MutantRegistry.getInstance().setActiveMutant(activeMutantProp.trim());
-        }
+        MutantBootstrap.activateFromSystemProperties();
 
         getStore(context).put("testStartTime", System.currentTimeMillis());
         getStore(context).remove("handledFailure");
@@ -142,6 +138,13 @@ public class SparkMutatorExtension implements
     @Override
     public void handleTestExecutionException(ExtensionContext context, Throwable throwable) throws Throwable {
         if (isDisabled(context)) {
+            throw throwable;
+        }
+
+        // External orchestration: never suppress a test failure. The Mojo
+        // classifies the mutant from Surefire's non-zero exit code; swallowing
+        // the assertion here would make a killed mutant look like a SURVIVED.
+        if (MutantBootstrap.phaseOrNull() != null) {
             throw throwable;
         }
 
@@ -188,12 +191,14 @@ public class SparkMutatorExtension implements
             if (activeMutant != null) {
                 Boolean handled = getStore(context).get("handledFailure", Boolean.class);
                 if (handled == null || !handled) {
-                    Long start = getStore(context).get("testStartTime", Long.class);
-                    long elapsed = start != null ? (System.currentTimeMillis() - start) : 0L;
-                    try {
-                        ReportSink.recordOutcome(activeMutant, "SURVIVED", elapsed, null);
-                    } catch (IllegalStateException ignored) {
-                        // Already recorded
+                    if (MutantBootstrap.phaseOrNull() == null) {
+                        Long start = getStore(context).get("testStartTime", Long.class);
+                        long elapsed = start != null ? (System.currentTimeMillis() - start) : 0L;
+                        try {
+                            ReportSink.recordOutcome(activeMutant, "SURVIVED", elapsed, null);
+                        } catch (IllegalStateException ignored) {
+                            // Already recorded
+                        }
                     }
                 }
             }
@@ -215,17 +220,44 @@ public class SparkMutatorExtension implements
             return;
         }
 
+        // External orchestration (Maven Mojo): the extension is a bridge, not
+        // an orchestrator. On baseline completion it serializes the discovered
+        // catalog to the shared output directory so the Mojo (a different JVM)
+        // can read it back. Outcomes and reports are the Mojo's responsibility.
+        if (MutantBootstrap.phaseOrNull() != null) {
+            if (MutantBootstrap.PHASE_BASELINE.equals(MutantBootstrap.phaseOrNull())) {
+                String outputDir = MutantBootstrap.outputDirectoryOrNull();
+                if (outputDir != null) {
+                    MutationCatalogIo.writeCatalogJson(Path.of(outputDir), MutationCatalogAccess.allEntries());
+                }
+            }
+            return;
+        }
+
+        // Standalone in-process mode (no external phase).
         Boolean baselineMode = getStore(context).get("baselineMode", Boolean.class);
         Boolean baselineFailed = getStore(context).get("baselineFailed", Boolean.class);
-        String activeMutantProp = System.getProperty(PROPERTY_ACTIVE_MUTANT);
 
-        if (Boolean.TRUE.equals(baselineMode)
-                && !Boolean.TRUE.equals(baselineFailed)
-                && (activeMutantProp == null || activeMutantProp.isBlank())) {
+        if (Boolean.TRUE.equals(baselineMode) && !Boolean.TRUE.equals(baselineFailed)) {
             runInProcessMutations(context);
         }
 
         ReportSink.finalizeAndWriteReports();
+
+        // Optional in-process quality gate. Only enforced when the caller
+        // explicitly sets a minimum (via surefire systemPropertyVariables or
+        // argLine); unset means off, preserving non-blocking IDE / plain
+        // `mvn test` behavior. The report is written above even when the gate
+        // fails, so CI still has the artifact explaining the shortfall.
+        String minScoreProp = System.getProperty(MutantBootstrap.PROP_MIN_MUTATION_SCORE);
+        if (minScoreProp != null && !minScoreProp.isBlank()) {
+            double minScore = Double.parseDouble(minScoreProp.trim());
+            double score = ReportSink.computeMutationScore();
+            if (minScore > 0.0 && score < minScore) {
+                throw new IllegalStateException(
+                        "Mutation score " + score + "% is below minimum " + minScore + "%.");
+            }
+        }
     }
 
     private void runInProcessMutations(ExtensionContext context) throws Exception {
