@@ -1,0 +1,364 @@
+package io.github.wpunit13.mutator.junit5;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.wpunit13.mutator.MutantRegistry;
+import io.github.wpunit13.mutator.catalog.MutationCatalogAccess;
+import io.github.wpunit13.mutator.report.ReportSink;
+import io.github.wpunit13.mutator.reset.SessionResetFacade;
+
+import java.lang.reflect.Constructor;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.AfterAllCallback;
+import org.junit.jupiter.api.extension.AfterEachCallback;
+import org.junit.jupiter.api.extension.BeforeAllCallback;
+import org.junit.jupiter.api.extension.BeforeEachCallback;
+import org.junit.jupiter.api.extension.ExtensionContext;
+import org.junit.jupiter.api.extension.TestExecutionExceptionHandler;
+
+/**
+ * Direct JUnit 5 extension orchestrating in-process Spark mutation testing.
+ *
+ * <p>Lifecycle:
+ * <ol>
+ *   <li>{@code BeforeAll}: ensures {@code MutatorSparkExtension} is registered for SparkSession.</li>
+ *   <li>{@code BeforeEach}: if driving a mutation run, sets the active mutant on {@link MutantRegistry}.</li>
+ *   <li>{@code AfterEach}: clears active mutant via {@link MutantRegistry#clearActiveMutant(String)}
+ *       and cleans Catalyst plan and table caches.</li>
+ *   <li>{@code TestExecutionExceptionHandler}: catches {@link AssertionError} in mutation mode and records KILLED.</li>
+ *   <li>{@code AfterAll}: in baseline direct runs, iterates discovered mutants and emits final reports.</li>
+ * </ol>
+ */
+public class SparkMutatorExtension implements
+        BeforeAllCallback,
+        BeforeEachCallback,
+        AfterEachCallback,
+        AfterAllCallback,
+        TestExecutionExceptionHandler {
+
+    public static final String PROPERTY_MUTATOR_DISABLED = "spark.mutator.disabled";
+    public static final String PROPERTY_MUTATOR_ENABLED = "spark.mutator.enabled";
+    public static final String PROPERTY_ACTIVE_MUTANT = "spark.mutator.active.mutant";
+    public static final String EXTENSION_CLASS = "io.github.wpunit13.mutator.MutatorSparkExtension";
+
+    private static final ExtensionContext.Namespace NAMESPACE =
+            ExtensionContext.Namespace.create(SparkMutatorExtension.class);
+
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    private ExtensionContext.Store getStore(ExtensionContext context) {
+        return context.getStore(NAMESPACE);
+    }
+
+    private boolean isDisabled(ExtensionContext context) {
+        if ("true".equalsIgnoreCase(System.getProperty(PROPERTY_MUTATOR_DISABLED))
+                || "false".equalsIgnoreCase(System.getProperty(PROPERTY_MUTATOR_ENABLED))) {
+            return true;
+        }
+        return context.getTestClass()
+                .map(c -> c.getAnnotation(EnableSparkMutationTesting.class))
+                .map(ann -> !ann.enabled())
+                .orElse(false);
+    }
+
+    private void ensureSparkExtensionActive() {
+        String existing = System.getProperty("spark.sql.extensions");
+        if (existing == null || existing.isBlank()) {
+            System.setProperty("spark.sql.extensions", EXTENSION_CLASS);
+        } else if (!existing.contains(EXTENSION_CLASS)) {
+            System.setProperty("spark.sql.extensions", existing + "," + EXTENSION_CLASS);
+        }
+    }
+
+    /**
+     * Cleans Catalyst caches across active/default SparkSessions using SessionResetFacade.
+     */
+    public static void cleanCatalystCache() {
+        try {
+            Class<?> sparkSessionClass = Class.forName("org.apache.spark.sql.SparkSession");
+            Object opt = sparkSessionClass.getMethod("getActiveSession").invoke(null);
+            Method isDefined = opt.getClass().getMethod("isDefined");
+            Object spark = null;
+            if ((Boolean) isDefined.invoke(opt)) {
+                spark = opt.getClass().getMethod("get").invoke(opt);
+            } else {
+                Object defaultOpt = sparkSessionClass.getMethod("getDefaultSession").invoke(null);
+                if ((Boolean) isDefined.invoke(defaultOpt)) {
+                    spark = defaultOpt.getClass().getMethod("get").invoke(defaultOpt);
+                }
+            }
+            if (spark != null) {
+                SessionResetFacade.resetSessionState(spark, 0L);
+            }
+        } catch (Throwable ignored) {
+            // Spark may not be present or no active session; safely continue
+        }
+    }
+
+    // 1. BeforeAll: ensure MutatorSparkExtension is active on JVM SparkSession
+    @Override
+    public void beforeAll(ExtensionContext context) throws Exception {
+        if (isDisabled(context)) {
+            return;
+        }
+        ensureSparkExtensionActive();
+
+        String activeMutantProp = System.getProperty(PROPERTY_ACTIVE_MUTANT);
+        if (activeMutantProp != null && !activeMutantProp.isBlank()) {
+            MutantRegistry.getInstance().setActiveMutant(activeMutantProp.trim());
+        }
+
+        boolean isBaseline = (MutantRegistry.getInstance().getActiveMutantOrNull() == null);
+        getStore(context).put("baselineMode", isBaseline);
+    }
+
+    // 2. BeforeEach: if driving mutation run, set active mutant
+    @Override
+    public void beforeEach(ExtensionContext context) throws Exception {
+        if (isDisabled(context)) {
+            return;
+        }
+
+        String activeMutantProp = System.getProperty(PROPERTY_ACTIVE_MUTANT);
+        if (activeMutantProp != null && !activeMutantProp.isBlank()
+                && MutantRegistry.getInstance().getActiveMutantOrNull() == null) {
+            MutantRegistry.getInstance().setActiveMutant(activeMutantProp.trim());
+        }
+
+        getStore(context).put("testStartTime", System.currentTimeMillis());
+        getStore(context).remove("handledFailure");
+        getStore(context).remove("failureDetail");
+    }
+
+    // 4. TestExecutionExceptionHandler: catch AssertionError -> record KILLED
+    @Override
+    public void handleTestExecutionException(ExtensionContext context, Throwable throwable) throws Throwable {
+        if (isDisabled(context)) {
+            throw throwable;
+        }
+
+        String activeMutant = MutantRegistry.getInstance().getActiveMutantOrNull();
+        if (activeMutant != null) {
+            Throwable root = unwrap(throwable);
+            Long start = getStore(context).get("testStartTime", Long.class);
+            long elapsed = start != null ? (System.currentTimeMillis() - start) : 0L;
+            String failureDetail = root.getMessage() != null ? root.getMessage() : root.toString();
+            getStore(context).put("handledFailure", true);
+
+            if (root instanceof AssertionError) {
+                try {
+                    ReportSink.recordOutcome(activeMutant, "KILLED", elapsed, failureDetail);
+                } catch (IllegalStateException ignored) {
+                    // Already recorded
+                }
+                // Suppress AssertionError so test runner indicates mutant was successfully killed
+                return;
+            } else {
+                try {
+                    ReportSink.recordOutcome(activeMutant, "ERRORED", elapsed, failureDetail);
+                } catch (IllegalStateException ignored) {
+                    // Already recorded
+                }
+                throw throwable;
+            }
+        }
+
+        // In baseline mode, record baseline failure and let exception surface normally
+        getStore(context).put("baselineFailed", true);
+        throw throwable;
+    }
+
+    // 3. AfterEach: clear active mutant and clean Catalyst cache
+    @Override
+    public void afterEach(ExtensionContext context) throws Exception {
+        if (isDisabled(context)) {
+            return;
+        }
+
+        String activeMutant = MutantRegistry.getInstance().getActiveMutantOrNull();
+        try {
+            if (activeMutant != null) {
+                Boolean handled = getStore(context).get("handledFailure", Boolean.class);
+                if (handled == null || !handled) {
+                    Long start = getStore(context).get("testStartTime", Long.class);
+                    long elapsed = start != null ? (System.currentTimeMillis() - start) : 0L;
+                    try {
+                        ReportSink.recordOutcome(activeMutant, "SURVIVED", elapsed, null);
+                    } catch (IllegalStateException ignored) {
+                        // Already recorded
+                    }
+                }
+            }
+        } finally {
+            try {
+                if (activeMutant != null) {
+                    MutantRegistry.getInstance().clearActiveMutant(activeMutant);
+                }
+            } finally {
+                cleanCatalystCache();
+            }
+        }
+    }
+
+    // 5. AfterAll: if all mutants tested, generate mutation-report.json
+    @Override
+    public void afterAll(ExtensionContext context) throws Exception {
+        if (isDisabled(context)) {
+            return;
+        }
+
+        Boolean baselineMode = getStore(context).get("baselineMode", Boolean.class);
+        Boolean baselineFailed = getStore(context).get("baselineFailed", Boolean.class);
+        String activeMutantProp = System.getProperty(PROPERTY_ACTIVE_MUTANT);
+
+        if (Boolean.TRUE.equals(baselineMode)
+                && !Boolean.TRUE.equals(baselineFailed)
+                && (activeMutantProp == null || activeMutantProp.isBlank())) {
+            runInProcessMutations(context);
+        }
+
+        ReportSink.finalizeAndWriteReports();
+    }
+
+    private void runInProcessMutations(ExtensionContext context) throws Exception {
+        String catalogJson = MutationCatalogAccess.getFullCatalogJson();
+        JsonNode catalogNode = MAPPER.readTree(catalogJson);
+
+        if (catalogNode == null || !catalogNode.isArray() || catalogNode.isEmpty()) {
+            return;
+        }
+
+        Class<?> testClass = context.getRequiredTestClass();
+
+        for (JsonNode mutantEntry : catalogNode) {
+            String mutantId = mutantEntry.get("mutantId").asText();
+            JsonNode mappedTestsNode = mutantEntry.get("mappedTestIds");
+            Set<String> mappedTestNames = new HashSet<>();
+            if (mappedTestsNode != null && mappedTestsNode.isArray()) {
+                for (JsonNode t : mappedTestsNode) {
+                    mappedTestNames.add(t.asText());
+                }
+            }
+
+            long start = System.currentTimeMillis();
+            boolean killed = false;
+            String failureDetail = null;
+            boolean errored = false;
+
+            try {
+                MutantRegistry.getInstance().setActiveMutant(mutantId);
+                cleanCatalystCache();
+
+                executeTestsForMutant(testClass, mappedTestNames);
+            } catch (Throwable t) {
+                Throwable root = unwrap(t);
+                if (root instanceof AssertionError) {
+                    killed = true;
+                    failureDetail = root.getMessage() != null ? root.getMessage() : root.toString();
+                } else {
+                    errored = true;
+                    failureDetail = "Unhandled exception: " + root.toString();
+                }
+            } finally {
+                try {
+                    if (mutantId.equals(MutantRegistry.getInstance().getActiveMutantOrNull())) {
+                        MutantRegistry.getInstance().clearActiveMutant(mutantId);
+                    } else if (MutantRegistry.getInstance().getActiveMutantOrNull() != null) {
+                        MutantRegistry.getInstance().reset();
+                    }
+                } finally {
+                    cleanCatalystCache();
+                }
+            }
+
+            long elapsed = System.currentTimeMillis() - start;
+            try {
+                if (killed) {
+                    ReportSink.recordOutcome(mutantId, "KILLED", elapsed, failureDetail);
+                } else if (errored) {
+                    ReportSink.recordOutcome(mutantId, "ERRORED", elapsed, failureDetail);
+                } else {
+                    ReportSink.recordOutcome(mutantId, "SURVIVED", elapsed, null);
+                }
+            } catch (IllegalStateException ignored) {
+                // Write-once
+            }
+        }
+    }
+
+    private void executeTestsForMutant(Class<?> testClass, Set<String> mappedTestNames) throws Throwable {
+        Constructor<?> ctor = testClass.getDeclaredConstructor();
+        ctor.setAccessible(true);
+        Object testInstance = ctor.newInstance();
+
+        List<Method> beforeMethods = findMethodsWithAnnotation(testClass, BeforeEach.class);
+        List<Method> afterMethods = findMethodsWithAnnotation(testClass, AfterEach.class);
+        List<Method> testMethods = findTestMethods(testClass, mappedTestNames);
+
+        for (Method testMethod : testMethods) {
+            try {
+                for (Method before : beforeMethods) {
+                    before.setAccessible(true);
+                    before.invoke(testInstance);
+                }
+                testMethod.setAccessible(true);
+                testMethod.invoke(testInstance);
+            } finally {
+                for (Method after : afterMethods) {
+                    try {
+                        after.setAccessible(true);
+                        after.invoke(testInstance);
+                    } catch (Throwable ignored) {
+                    }
+                }
+            }
+        }
+    }
+
+    private List<Method> findMethodsWithAnnotation(Class<?> testClass, Class<? extends java.lang.annotation.Annotation> annotation) {
+        List<Method> methods = new ArrayList<>();
+        for (Method m : testClass.getDeclaredMethods()) {
+            if (m.isAnnotationPresent(annotation)) {
+                methods.add(m);
+            }
+        }
+        return methods;
+    }
+
+    private List<Method> findTestMethods(Class<?> testClass, Set<String> mappedTestNames) {
+        List<Method> result = new ArrayList<>();
+        for (Method m : testClass.getDeclaredMethods()) {
+            if (m.isAnnotationPresent(Test.class)) {
+                if (mappedTestNames.isEmpty()
+                        || mappedTestNames.contains(m.getName())
+                        || mappedTestNames.contains(testClass.getName() + "#" + m.getName())) {
+                    result.add(m);
+                }
+            }
+        }
+        if (result.isEmpty()) {
+            for (Method m : testClass.getDeclaredMethods()) {
+                if (m.isAnnotationPresent(Test.class)) {
+                    result.add(m);
+                }
+            }
+        }
+        return result;
+    }
+
+    private static Throwable unwrap(Throwable t) {
+        Throwable current = t;
+        while (current instanceof InvocationTargetException && current.getCause() != null) {
+            current = current.getCause();
+        }
+        return current;
+    }
+}
