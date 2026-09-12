@@ -3,12 +3,16 @@ package io.github.wpunit13.mutator.spark35
 import io.github.wpunit13.mutator.api.{NodeCoordinateFactory, OperatorType, ShimMutationException, SparkShimVersion}
 import io.github.wpunit13.mutator.hash.DeterministicHasher
 import org.apache.spark.sql.{DataFrame, SparkSession}
-import org.apache.spark.sql.catalyst.expressions.{Alias, And, Literal, Not}
+import org.apache.spark.sql.catalyst.expressions.{
+  Alias, And, Ascending, Coalesce, Descending, Literal, Not, SortOrder,
+  SpecifiedWindowFrame, UnaryMinus, UnboundedPreceding, WindowExpression
+}
 import org.apache.spark.sql.catalyst.expressions.aggregate.{Count, Max, Min, Sum}
-import org.apache.spark.sql.catalyst.plans.logical.{Aggregate, Filter, Join, LocalRelation}
+import org.apache.spark.sql.catalyst.plans.logical.{Aggregate, Filter, Join, LocalRelation, Project, Window => LogicalWindow}
 import org.apache.spark.sql.catalyst.plans.{Cross, LeftOuter}
-import org.apache.spark.sql.functions.{col, count, max, min, sum}
-import org.apache.spark.sql.types.{BooleanType, LongType}
+import org.apache.spark.sql.expressions.Window
+import org.apache.spark.sql.functions.{coalesce, col, count, lit, max, min, row_number, sum}
+import org.apache.spark.sql.types.{BooleanType, LongType, StringType}
 import org.scalatest.BeforeAndAfterAll
 import org.scalatest.funsuite.AnyFunSuite
 
@@ -52,12 +56,90 @@ class ShimImplSpec extends AnyFunSuite with BeforeAndAfterAll {
     df.queryExecution.analyzed.collectFirst { case a: Aggregate => a }
       .getOrElse(fail("no Aggregate node found in analyzed plan"))
 
+  private def findWindow(df: DataFrame): LogicalWindow =
+    df.queryExecution.analyzed.collectFirst { case w: LogicalWindow => w }
+      .getOrElse(fail("no Window node found in analyzed plan"))
+
+  private def findProject(df: DataFrame): Project =
+    df.queryExecution.analyzed.collectFirst { case p: Project => p }
+      .getOrElse(fail("no Project node found in analyzed plan"))
+
   private def groupedAggregated(): DataFrame = {
     import spark.implicits._
     Seq(("Engineering", "US-East", 100000L), ("Sales", "US-West", 80000L))
       .toDF("dept", "region", "salary")
       .groupBy("dept", "region")
       .agg(sum("salary"))
+  }
+
+  private def windowed(): DataFrame = {
+    import spark.implicits._
+    Seq(("Engineering", 100000L), ("Sales", 80000L))
+      .toDF("dept", "salary")
+      .select(
+        col("dept"),
+        col("salary"),
+        row_number().over(Window.partitionBy("dept").orderBy("salary")).as("rn")
+      )
+  }
+
+  private def coalesced(): DataFrame = {
+    import spark.implicits._
+    Seq(("Alice", 100), (null, 200))
+      .toDF("name", "val")
+      .select(
+        coalesce(col("name"), lit("UNKNOWN")).as("c_name"),
+        col("val")
+      )
+  }
+
+  private def bareProject(): DataFrame = {
+    import spark.implicits._
+    Seq(("Alice", 100))
+      .toDF("name", "val")
+      .select(col("name"), col("val"))
+  }
+
+  private def windowA(): DataFrame = {
+    import spark.implicits._
+    Seq(("Engineering", 100000L), ("Sales", 80000L))
+      .toDF("dept", "salary").as("winA")
+      .select(
+        col("dept"),
+        col("salary"),
+        row_number().over(Window.partitionBy("dept").orderBy("salary")).as("rn")
+      )
+  }
+
+  private def windowB(): DataFrame = {
+    import spark.implicits._
+    Seq(("Engineering", 100000L), ("Sales", 80000L))
+      .toDF("dept", "salary").as("winB")
+      .select(
+        col("dept"),
+        col("salary"),
+        row_number().over(Window.partitionBy("dept").orderBy("salary")).as("rn")
+      )
+  }
+
+  private def projectA(): DataFrame = {
+    import spark.implicits._
+    Seq(("Alice", 100), (null, 200))
+      .toDF("name", "val").as("projA")
+      .select(
+        coalesce(col("name"), lit("UNKNOWN")).as("c_name"),
+        col("val")
+      )
+  }
+
+  private def projectB(): DataFrame = {
+    import spark.implicits._
+    Seq(("Alice", 100), (null, 200))
+      .toDF("name", "val").as("projB")
+      .select(
+        coalesce(col("name"), lit("UNKNOWN")).as("c_name"),
+        col("val")
+      )
   }
 
   private def findLocalRelation(df: DataFrame): LocalRelation =
@@ -406,9 +488,187 @@ class ShimImplSpec extends AnyFunSuite with BeforeAndAfterAll {
     assert(mutantId == GOLDEN_MUTANT_ID)
   }
 
-  test("mutateWindow and mutateProject are not implemented in this release") {
-    val joinNode = findJoin(joined())
-    intercept[UnsupportedOperationException](shim.mutateWindow(joinNode, 0))
-    intercept[UnsupportedOperationException](shim.mutateProject(joinNode, 0))
+  test("classify on Window node returns Window with candidates 0 (INVERT_WINDOW_ORDER) and 1 (TRUNCATE_WINDOW_FRAME)") {
+    val winNode = findWindow(windowed())
+    val result = shim.classify(winNode, 2, 0)
+
+    val (opType, candidates) = result.getOrElse(fail("expected Some for a Window node"))
+    assert(opType == OperatorType.Window)
+    assert(candidates.map(_.mutationIndex) == Seq(0, 1))
+    assert(candidates.map(_.description) == Seq("INVERT_WINDOW_ORDER", "TRUNCATE_WINDOW_FRAME"))
+    assert(candidates.forall(_.operatorType == OperatorType.Window))
+
+    val sig = shim.canonicalExprSig(winNode, OperatorType.Window)
+    val expectedCoord = NodeCoordinateFactory(2, OperatorType.Window, 0, sig)
+    assert(candidates.forall(_.coordinate == expectedCoord))
+  }
+
+  test("mutateWindow with mutationIndex 0 inverts orderBy direction and preserves schema") {
+    val winNode = findWindow(windowed())
+    assert(winNode.orderSpec.head.direction == Ascending)
+
+    val mutated = shim.mutateWindow(winNode, 0).asInstanceOf[LogicalWindow]
+    assert(mutated.orderSpec.head.direction == Descending)
+
+    // WindowSpecDefinition within windowExpressions must also have its orderSpec inverted
+    val nestedOrderSpec = mutated.windowExpressions.collectFirst {
+      case Alias(WindowExpression(_, spec), _) => spec.orderSpec
+    }.getOrElse(fail("expected WindowExpression in windowExpressions"))
+    assert(nestedOrderSpec.head.direction == Descending)
+
+    // Schema output strictly preserved
+    assert(mutated.schema == winNode.schema)
+    assert(mutated.output.map(_.dataType) == winNode.output.map(_.dataType))
+    assert(mutated.output.map(_.name) == winNode.output.map(_.name))
+  }
+
+  test("mutateWindow with mutationIndex 1 truncates frame starting with UnboundedPreceding and preserves schema") {
+    val winNode = findWindow(windowed())
+    val originalFrame = winNode.windowExpressions.collectFirst {
+      case Alias(WindowExpression(_, spec), _) => spec.frameSpecification.asInstanceOf[SpecifiedWindowFrame]
+    }.getOrElse(fail("expected SpecifiedWindowFrame in windowExpressions"))
+    assert(originalFrame.lower == UnboundedPreceding)
+
+    val mutated = shim.mutateWindow(winNode, 1).asInstanceOf[LogicalWindow]
+    val mutatedFrame = mutated.windowExpressions.collectFirst {
+      case Alias(WindowExpression(_, spec), _) => spec.frameSpecification.asInstanceOf[SpecifiedWindowFrame]
+    }.getOrElse(fail("expected SpecifiedWindowFrame in mutated windowExpressions"))
+
+    assert(mutatedFrame.lower == UnaryMinus(Literal(1)))
+
+    // Schema output strictly preserved
+    assert(mutated.schema == winNode.schema)
+    assert(mutated.output.map(_.dataType) == winNode.output.map(_.dataType))
+    assert(mutated.output.map(_.name) == winNode.output.map(_.name))
+  }
+
+  test("mutateWindow with out-of-range mutationIndex or non-Window node throws ShimMutationException") {
+    val winNode = findWindow(windowed())
+    val filterNode = findFilter(andFiltered())
+
+    intercept[ShimMutationException] {
+      shim.mutateWindow(winNode, 99)
+    }
+    intercept[ShimMutationException] {
+      shim.mutateWindow(filterNode, 0)
+    }
+  }
+
+  test("classify on Project with Coalesce returns Project with candidates 0 and 1") {
+    val projNode = findProject(coalesced())
+    val result = shim.classify(projNode, 1, 0)
+
+    val (opType, candidates) = result.getOrElse(fail("expected Some for a Project node"))
+    assert(opType == OperatorType.Project)
+    assert(candidates.map(_.mutationIndex) == Seq(0, 1))
+    assert(candidates.map(_.description) == Seq("COALESCE_BYPASS", "INJECT_NULL"))
+    assert(candidates.forall(_.operatorType == OperatorType.Project))
+
+    val sig = shim.canonicalExprSig(projNode, OperatorType.Project)
+    val expectedCoord = NodeCoordinateFactory(1, OperatorType.Project, 0, sig)
+    assert(candidates.forall(_.coordinate == expectedCoord))
+  }
+
+  test("classify on Project without Coalesce returns Project with only candidate 1 (INJECT_NULL)") {
+    val projNode = findProject(bareProject())
+    val (_, candidates) = shim.classify(projNode, 1, 0).getOrElse(fail("expected Some for a Project node"))
+    assert(candidates.map(_.mutationIndex) == Seq(1))
+    assert(candidates.map(_.description) == Seq("INJECT_NULL"))
+  }
+
+  test("mutateProject with mutationIndex 0 bypasses coalesce and preserves schema") {
+    val projNode = findProject(coalesced())
+    assert(projNode.projectList.exists(_.exists(_.isInstanceOf[Coalesce])))
+
+    val mutated = shim.mutateProject(projNode, 0).asInstanceOf[Project]
+    assert(!mutated.projectList.exists(_.exists(_.isInstanceOf[Coalesce])))
+
+    // Check that the coalesce alias child is now the first child (col "name")
+    val cAlias = mutated.projectList.collectFirst {
+      case a: Alias if a.name == "c_name" => a
+    }.getOrElse(fail("expected c_name alias in projectList"))
+    assert(cAlias.child.sql.contains("name"))
+
+    // Schema output strictly preserved (column names and data types)
+    assert(mutated.output.map(_.dataType) == projNode.output.map(_.dataType))
+    assert(mutated.output.map(_.name) == projNode.output.map(_.name))
+  }
+
+  test("mutateProject with mutationIndex 1 replaces first non-alias expression with literal null and preserves schema") {
+    val projNode = findProject(bareProject())
+    val mutated = shim.mutateProject(projNode, 1).asInstanceOf[Project]
+
+    val firstExpr = mutated.projectList.head
+    assert(firstExpr.name == "name")
+    assert(firstExpr.dataType == StringType)
+    assert(firstExpr.isInstanceOf[Alias])
+    val lit = firstExpr.asInstanceOf[Alias].child
+    assert(lit.isInstanceOf[Literal])
+    assert(lit.asInstanceOf[Literal].value == null)
+
+    // Schema output strictly preserved (column names and data types)
+    assert(mutated.output.map(_.dataType) == projNode.output.map(_.dataType))
+    assert(mutated.output.map(_.name) == projNode.output.map(_.name))
+  }
+
+  test("mutateProject with out-of-range mutationIndex or non-Project node throws ShimMutationException") {
+    val projNode = findProject(bareProject())
+    val filterNode = findFilter(andFiltered())
+
+    intercept[ShimMutationException] {
+      shim.mutateProject(projNode, 99)
+    }
+    intercept[ShimMutationException] {
+      shim.mutateProject(filterNode, 0)
+    }
+    intercept[ShimMutationException] {
+      shim.mutateProject(projNode, 0) // No coalesce in bareProject
+    }
+  }
+
+  test("canonicalExprSig for Window and Project is byte-identical across independent builds with different exprIds") {
+    val winA = findWindow(windowA())
+    val winB = findWindow(windowB())
+    val projA = findProject(projectA())
+    val projB = findProject(projectB())
+
+    assert(winA.output.map(_.exprId.id) != winB.output.map(_.exprId.id))
+    assert(projA.output.map(_.exprId.id) != projB.output.map(_.exprId.id))
+
+    val winSigA = shim.canonicalExprSig(winA, OperatorType.Window)
+    val winSigB = shim.canonicalExprSig(winB, OperatorType.Window)
+    assert(winSigA == winSigB, s"window signatures differ:\n  A = $winSigA\n  B = $winSigB")
+
+    val projSigA = shim.canonicalExprSig(projA, OperatorType.Project)
+    val projSigB = shim.canonicalExprSig(projB, OperatorType.Project)
+    assert(projSigA == projSigB, s"project signatures differ:\n  A = $projSigA\n  B = $projSigB")
+  }
+
+  test("golden cross-version: pinned canonical window query yields byte-identical NodeCoordinate and MutantID") {
+    // Pinned independently with `shasum -a 256` (the same discipline as the
+    // aggregate golden test above).
+    //
+    // Canonical query: row_number().over(Window.partitionBy("dept").orderBy("salary"))
+    //   exprSig    = row_number() OVER (PARTITION BY #0 ORDER BY #1 ASC NULLS FIRST ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS rn;#0;#1 ASC NULLS FIRST
+    //   coordinate = 2|WINDOW|0|<exprSig>
+    //   mutantId   = test/path|<coordinateHex>|WINDOW|0
+    val GOLDEN_WIN_SIG = "row_number() OVER (PARTITION BY #0 ORDER BY #1 ASC NULLS FIRST ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS rn;#0;#1 ASC NULLS FIRST"
+    val GOLDEN_WIN_COORDINATE = "b580d553f8217aac"
+    val GOLDEN_WIN_MUTANT_ID = "3aec48466076d976"
+
+    val winNode = findWindow(windowed())
+
+    val sig = shim.canonicalExprSig(winNode, OperatorType.Window)
+    assert(sig == GOLDEN_WIN_SIG, s"window signature drifted:\n  got  = $sig\n  want = $GOLDEN_WIN_SIG")
+
+    val coordinate = NodeCoordinateFactory(2, OperatorType.Window, 0, sig)
+    assert(coordinate.toHex == GOLDEN_WIN_COORDINATE)
+
+    val (_, candidates) = shim.classify(winNode, 2, 0).getOrElse(fail("expected Window candidates"))
+    assert(candidates.map(_.mutationIndex) == Seq(0, 1))
+    assert(candidates.forall(_.coordinate.toHex == GOLDEN_WIN_COORDINATE))
+
+    val mutantId = DeterministicHasher.computeMutantId("test/path", coordinate.toHex, "WINDOW", 0)
+    assert(mutantId == GOLDEN_WIN_MUTANT_ID)
   }
 }

@@ -1,10 +1,14 @@
 package io.github.wpunit13.mutator.spark35
 
 import io.github.wpunit13.mutator.api._
-import org.apache.spark.sql.catalyst.expressions.{Alias, And, Attribute, AttributeReference, Expression, Literal, NamedExpression, Not}
+import org.apache.spark.sql.catalyst.expressions.{
+  Alias, And, Ascending, Attribute, AttributeReference, Coalesce, Descending,
+  Expression, Literal, NamedExpression, Not, SortOrder, SpecifiedWindowFrame,
+  UnaryMinus, UnboundedPreceding, WindowExpression
+}
 import org.apache.spark.sql.catalyst.expressions.aggregate.{AggregateExpression, AggregateFunction, Count, Max, Min, Sum}
 import org.apache.spark.sql.catalyst.plans.{Cross, JoinType, LeftAnti, LeftOuter}
-import org.apache.spark.sql.catalyst.plans.logical.{Aggregate, Filter, Join, LogicalPlan}
+import org.apache.spark.sql.catalyst.plans.logical.{Aggregate, Filter, Join, LogicalPlan, Project, Window}
 import org.apache.spark.sql.types.BooleanType
 
 /**
@@ -65,6 +69,44 @@ abstract class Spark35ShimBase extends PlanMutatorShim {
       }
       builder += MutationCandidate(coord, OperatorType.Aggregate, 2, "AGGREGATE -> zero aggregate")
       Some((OperatorType.Aggregate, builder.result()))
+
+    case w: Window =>
+      val coord = NodeCoordinateFactory(depth, OperatorType.Window, childOrdinal,
+        canonicalExprSig(node, OperatorType.Window))
+      val builder = Seq.newBuilder[MutationCandidate]
+      if (w.orderSpec.nonEmpty) {
+        builder += MutationCandidate(coord, OperatorType.Window, 0, "INVERT_WINDOW_ORDER")
+      }
+      val hasUnbounded = w.windowExpressions.exists(_.exists {
+        case f: SpecifiedWindowFrame => f.lower == UnboundedPreceding
+        case _                       => false
+      })
+      if (hasUnbounded) {
+        builder += MutationCandidate(coord, OperatorType.Window, 1, "TRUNCATE_WINDOW_FRAME")
+      }
+      val candidates = builder.result()
+      if (candidates.nonEmpty) {
+        Some((OperatorType.Window, candidates))
+      } else {
+        None
+      }
+
+    case p: Project =>
+      val coord = NodeCoordinateFactory(depth, OperatorType.Project, childOrdinal,
+        canonicalExprSig(node, OperatorType.Project))
+      val builder = Seq.newBuilder[MutationCandidate]
+      if (p.projectList.exists(containsCoalesce)) {
+        builder += MutationCandidate(coord, OperatorType.Project, 0, "COALESCE_BYPASS")
+      }
+      if (p.projectList.nonEmpty) {
+        builder += MutationCandidate(coord, OperatorType.Project, 1, "INJECT_NULL")
+      }
+      val candidates = builder.result()
+      if (candidates.nonEmpty) {
+        Some((OperatorType.Project, candidates))
+      } else {
+        None
+      }
 
     case _ => None
   }
@@ -176,11 +218,100 @@ abstract class Spark35ShimBase extends PlanMutatorShim {
       s"mutateAggregate expects an Aggregate node but found ${other.getClass.getName}")
   }
 
-  override def mutateWindow(node: LogicalPlan, mutationIndex: Int): LogicalPlan =
-    throw new UnsupportedOperationException("mutateWindow is not implemented in this release")
+  override def mutateWindow(node: LogicalPlan, mutationIndex: Int): LogicalPlan = node match {
+    case w: Window =>
+      mutationIndex match {
+        case 0 =>
+          if (w.orderSpec.isEmpty) {
+            throw new ShimMutationException(
+              "mutationIndex 0 requires non-empty orderSpec")
+          }
+          val newOrderSpec = w.orderSpec.map(invertSortOrder)
+          val newWindowExprs = w.windowExpressions.map { ne =>
+            ne.transformDown {
+              case so: SortOrder =>
+                invertSortOrder(so)
+            }.asInstanceOf[NamedExpression]
+          }
+          w.copy(windowExpressions = newWindowExprs, orderSpec = newOrderSpec)
 
-  override def mutateProject(node: LogicalPlan, mutationIndex: Int): LogicalPlan =
-    throw new UnsupportedOperationException("mutateProject is not implemented in this release")
+        case 1 =>
+          val hasUnbounded = w.windowExpressions.exists(_.exists {
+            case f: SpecifiedWindowFrame => f.lower == UnboundedPreceding
+            case _                       => false
+          })
+          if (!hasUnbounded) {
+            throw new ShimMutationException(
+              "mutationIndex 1 requires a SpecifiedWindowFrame starting with UnboundedPreceding")
+          }
+          val newWindowExprs = w.windowExpressions.map { namedExpr =>
+            namedExpr.transformDown {
+              case f: SpecifiedWindowFrame if f.lower == UnboundedPreceding =>
+                f.copy(lower = UnaryMinus(Literal(1)))
+            }.asInstanceOf[NamedExpression]
+          }
+          w.copy(windowExpressions = newWindowExprs)
+
+        case other => throw new ShimMutationException(
+          s"Unknown window mutationIndex $other; expected 0 or 1")
+      }
+
+    case other => throw new ShimMutationException(
+      s"mutateWindow expects a Window node but found ${other.getClass.getName}")
+  }
+
+  private def invertSortOrder(so: SortOrder): SortOrder = {
+    val newDirection = if (so.direction == Ascending) Descending else Ascending
+    so.copy(direction = newDirection)
+  }
+
+  override def mutateProject(node: LogicalPlan, mutationIndex: Int): LogicalPlan = node match {
+    case p: Project =>
+      mutationIndex match {
+        case 0 =>
+          if (!p.projectList.exists(containsCoalesce)) {
+            throw new ShimMutationException(
+              "mutationIndex 0 requires at least one expression containing Coalesce")
+          }
+          val newProjectList = p.projectList.map { namedExpr =>
+            namedExpr.transformDown {
+              case c: Coalesce if c.children.nonEmpty =>
+                c.children.head
+            }.asInstanceOf[NamedExpression]
+          }
+          p.copy(projectList = newProjectList)
+
+        case 1 =>
+          if (p.projectList.isEmpty) {
+            throw new ShimMutationException(
+              "mutationIndex 1 requires at least 1 project expression")
+          }
+          val targetIdx = p.projectList.indexWhere(!_.isInstanceOf[Alias])
+          val idx = if (targetIdx >= 0) targetIdx else 0
+          val targetExpr = p.projectList(idx)
+          val nullExpr: NamedExpression = targetExpr match {
+            case alias: Alias =>
+              alias.copy(child = Literal.create(null, alias.child.dataType), name = alias.name)(
+                alias.exprId, alias.qualifier, alias.explicitMetadata, alias.nonInheritableMetadataKeys)
+            case other =>
+              Alias(Literal.create(null, other.dataType), other.name)(
+                other.exprId, other.qualifier, None, Nil)
+          }
+          p.copy(projectList = p.projectList.updated(idx, nullExpr))
+
+        case other => throw new ShimMutationException(
+          s"Unknown project mutationIndex $other; expected 0 or 1")
+      }
+
+    case other => throw new ShimMutationException(
+      s"mutateProject expects a Project node but found ${other.getClass.getName}")
+  }
+
+  private def containsCoalesce(expr: Expression): Boolean =
+    expr.exists {
+      case c: Coalesce => c.children.nonEmpty
+      case _           => false
+    }
 
   override def canonicalExprSig(node: LogicalPlan, operatorType: OperatorType): String =
     (node, operatorType) match {
@@ -195,6 +326,15 @@ abstract class Spark35ShimBase extends PlanMutatorShim {
         val aggSig = a.aggregateExpressions.map(substituteExprIds(a, _))
         val groupingSig = a.groupingExpressions.map(substituteExprIds(a, _))
         (aggSig ++ groupingSig).mkString(";")
+
+      case (w: Window, OperatorType.Window) =>
+        val winSig = w.windowExpressions.map(substituteExprIds(w, _))
+        val partSig = w.partitionSpec.map(substituteExprIds(w, _))
+        val orderSig = w.orderSpec.map(substituteExprIds(w, _))
+        (winSig ++ partSig ++ orderSig).mkString(";")
+
+      case (p: Project, OperatorType.Project) =>
+        p.projectList.map(substituteExprIds(p, _)).mkString(";")
 
       case _ => ""
     }
