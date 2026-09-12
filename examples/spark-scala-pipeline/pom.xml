@@ -1,0 +1,131 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  WP-15 verification example: Scala 2.13 Spark pipeline with paired weak and
+  hardened suites.
+
+  The specs are JUnit 5 tests written in Scala (run by Surefire's JUnit
+  Platform provider), which lets them reuse the WP-12 `mutator-junit5`
+  extension directly — the mutation loop, fork-boundary bridge, and report
+  pipeline are identical to the Java example. (The phase-2 master plan
+  mentioned ScalaTest; JUnit 5 was chosen deliberately to avoid a net-new
+  ScalaTest bridge — see the WP-15 DEVIATIONS note.)
+
+  `mvn test-compile spark-mutation-testing:mutate -Pweak`     mutants SURVIVE
+  `mvn test-compile spark-mutation-testing:mutate -Phardened` mutants KILLED
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>io.github.wpunit13</groupId>
+    <artifactId>spark-mutation-testing-parent</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+    <relativePath>../../pom.xml</relativePath>
+  </parent>
+
+  <artifactId>spark-scala-pipeline</artifactId>
+  <packaging>jar</packaging>
+
+  <name>spark-scala-pipeline</name>
+  <description>
+    Scala 2.13 example pipeline for the WP-15 end-to-end survival/kill proof.
+    Fixture and pipeline logic match the WP-07 PySpark example row-for-row.
+  </description>
+
+  <dependencies>
+    <dependency>
+      <groupId>org.scala-lang</groupId>
+      <artifactId>scala-library</artifactId>
+      <scope>provided</scope>
+    </dependency>
+
+    <dependency>
+      <groupId>org.apache.spark</groupId>
+      <artifactId>spark-sql_2.13</artifactId>
+      <scope>provided</scope>
+    </dependency>
+
+    <dependency>
+      <groupId>io.github.wpunit13</groupId>
+      <artifactId>mutator-junit5</artifactId>
+      <version>1.0.0-SNAPSHOT</version>
+      <scope>test</scope>
+    </dependency>
+
+    <dependency>
+      <groupId>io.github.wpunit13</groupId>
+      <artifactId>interceptor-bundle-spark-3.5_2.13</artifactId>
+      <version>1.0.0-SNAPSHOT</version>
+      <scope>test</scope>
+    </dependency>
+
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>net.alchim31.maven</groupId>
+        <artifactId>scala-maven-plugin</artifactId>
+      </plugin>
+
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <configuration>
+          <includes>
+            <include>**/OrdersPipeline*Spec.*</include>
+          </includes>
+        </configuration>
+      </plugin>
+
+      <plugin>
+        <groupId>io.github.wpunit13</groupId>
+        <artifactId>spark-mutation-testing-maven-plugin</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+      </plugin>
+    </plugins>
+  </build>
+
+  <profiles>
+    <profile>
+      <id>weak</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-surefire-plugin</artifactId>
+            <configuration>
+              <includes>
+                <include>**/OrdersPipelineWeakSpec.*</include>
+              </includes>
+            </configuration>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+
+    <profile>
+      <id>hardened</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-surefire-plugin</artifactId>
+            <configuration>
+              <includes>
+                <include>**/OrdersPipelineHardenedSpec.*</include>
+              </includes>
+            </configuration>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+  </profiles>
+</project>

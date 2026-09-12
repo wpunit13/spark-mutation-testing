@@ -1,0 +1,125 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  WP-15 verification example: Java 17 / JUnit 5 Spark pipeline with paired
+  weak and hardened suites.
+
+  `mvn test`                      runs both suites (functional smoke; use
+                                  -Dspark.mutator.disabled=true for a pure
+                                  baseline run without the mutation loop)
+  `mvn test-compile spark-mutation-testing:mutate -Pweak`     mutants SURVIVE
+  `mvn test-compile spark-mutation-testing:mutate -Phardened` mutants KILLED
+
+  The interceptor bundle is a TEST dependency so that plain `mvn test` can load
+  MutatorSparkExtension; at `mutate` time the plugin additionally injects it via
+  additionalClasspathElements.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>io.github.wpunit13</groupId>
+    <artifactId>spark-mutation-testing-parent</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+    <relativePath>../../pom.xml</relativePath>
+  </parent>
+
+  <artifactId>spark-java-pipeline</artifactId>
+  <packaging>jar</packaging>
+
+  <name>spark-java-pipeline</name>
+  <description>
+    Java 17 / JUnit 5 example pipeline for the WP-15 end-to-end
+    survival/kill proof. Fixture and pipeline logic match the WP-07 PySpark
+    example row-for-row.
+  </description>
+
+  <dependencies>
+    <dependency>
+      <groupId>org.apache.spark</groupId>
+      <artifactId>spark-sql_2.13</artifactId>
+      <scope>provided</scope>
+    </dependency>
+
+    <dependency>
+      <groupId>io.github.wpunit13</groupId>
+      <artifactId>mutator-junit5</artifactId>
+      <version>1.0.0-SNAPSHOT</version>
+      <scope>test</scope>
+    </dependency>
+
+    <!--
+      Required for plain `mvn test`: MutatorSparkExtension lives here. The
+      mutation plugin adds the same jar at mutate time.
+    -->
+    <dependency>
+      <groupId>io.github.wpunit13</groupId>
+      <artifactId>interceptor-bundle-spark-3.5_2.13</artifactId>
+      <version>1.0.0-SNAPSHOT</version>
+      <scope>test</scope>
+    </dependency>
+
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <configuration>
+          <includes>
+            <include>**/OrdersPipeline*Test.java</include>
+          </includes>
+        </configuration>
+      </plugin>
+
+      <plugin>
+        <groupId>io.github.wpunit13</groupId>
+        <artifactId>spark-mutation-testing-maven-plugin</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+      </plugin>
+    </plugins>
+  </build>
+
+  <profiles>
+    <profile>
+      <id>weak</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-surefire-plugin</artifactId>
+            <configuration>
+              <includes>
+                <include>**/OrdersPipelineWeakTest.java</include>
+              </includes>
+            </configuration>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+
+    <profile>
+      <id>hardened</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-surefire-plugin</artifactId>
+            <configuration>
+              <includes>
+                <include>**/OrdersPipelineHardenedTest.java</include>
+              </includes>
+            </configuration>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+  </profiles>
+</project>

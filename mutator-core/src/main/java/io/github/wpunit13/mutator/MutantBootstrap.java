@@ -1,5 +1,12 @@
 package io.github.wpunit13.mutator;
 
+import io.github.wpunit13.mutator.catalog.MutationCatalogAccess;
+import io.github.wpunit13.mutator.catalog.MutationCatalogIo;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+
 /**
  * Framework-agnostic bridge between the fork-launch system properties set by
  * the Maven orchestrator and the per-JVM {@link MutantRegistry}.
@@ -32,6 +39,15 @@ public final class MutantBootstrap {
      * Applies the active-mutant and phase system properties to the registry,
      * exactly once. Idempotent: a second call with the same active mutant is a
      * no-op (the registry only transitions from IDLE to ACTIVE).
+     *
+     * <p>When a mutant is activated, this JVM's in-memory catalog must know
+     * it — the Catalyst rule resolves the mutant's coordinate through
+     * {@code MutationCatalogAccess.findByIdOrNull} and silently no-ops on an
+     * unknown id. A mutant fork never runs Discovery (that happened in the
+     * baseline fork, a different JVM), so the catalog is loaded from
+     * {@code catalog.json} in the configured output directory. Failing loudly
+     * here (instead of letting the rule no-op) is what keeps a broken handoff
+     * from masquerading as "every mutant survived".
      */
     public static void activateFromSystemProperties() {
         String active = System.getProperty(PROP_ACTIVE_MUTANT);
@@ -40,6 +56,37 @@ public final class MutantBootstrap {
         }
         if (MutantRegistry.getInstance().getActiveMutantOrNull() == null) {
             MutantRegistry.getInstance().setActiveMutant(active.trim());
+        }
+        ensureCatalogLoaded(active.trim());
+    }
+
+    private static void ensureCatalogLoaded(String activeMutantId) {
+        if (MutationCatalogAccess.findByIdOrNull(activeMutantId) != null) {
+            // Discovery already populated this JVM's catalog (baseline fork or
+            // in-process mode), or the bridge loaded it on a previous call.
+            return;
+        }
+        String dir = outputDirectoryOrNull();
+        if (dir == null || dir.isBlank()) {
+            throw new IllegalStateException(
+                    "Active mutant '" + activeMutantId + "' is not catalogued in this JVM and no '"
+                            + PROP_OUTPUT_DIRECTORY + "' system property is set to load catalog.json from.");
+        }
+        Path catalogFile = Path.of(dir, MutationCatalogIo.CATALOG_FILE_NAME);
+        if (!Files.isRegularFile(catalogFile)) {
+            throw new IllegalStateException(
+                    "Active mutant '" + activeMutantId + "' is not catalogued in this JVM and "
+                            + catalogFile + " does not exist. The baseline fork must run before "
+                            + "any mutant fork.");
+        }
+        try {
+            MutationCatalogAccess.loadCatalog(MutationCatalogIo.readCatalogJson(Path.of(dir)));
+        } catch (IOException e) {
+            throw new IllegalStateException("Could not load " + catalogFile, e);
+        }
+        if (MutationCatalogAccess.findByIdOrNull(activeMutantId) == null) {
+            throw new IllegalStateException(
+                    "Active mutant '" + activeMutantId + "' is not present in " + catalogFile + ".");
         }
     }
 

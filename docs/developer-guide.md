@@ -93,6 +93,10 @@ merge pass produces the single authoritative report).
 - `mutator-core/.../report/OutcomeFileStore.java` — `outcomes/<id>.json`
   write/read.
 
+Frameworks other than JUnit 5 implement the same handoff inside their own test
+lifecycle — the three mandatory obligations are specified in §7 (Harness
+integration contract).
+
 ---
 
 ## 3. System property contract
@@ -229,9 +233,44 @@ version.
 
 ---
 
+## 7. Harness integration contract (frameworks other than JUnit 5)
+
+The engine is test-framework agnostic: it hooks Spark via `spark.sql.extensions`
+and runs whenever a query is analyzed, whatever code drove the query. What IS
+framework-specific is the **harness** — the glue that bridges the fork boundary
+inside a test framework's lifecycle. `mutator-junit5` ships that glue for
+JUnit 5 (`SparkMutatorExtension`); `mutator-scalatest` ships it for ScalaTest
+(WP-18, `SparkMutatorBeforeAfterAll`). Any other framework (TestNG, Spock, a
+custom runner) implements the same contract against public `mutator-core` APIs:
+
+| # | When | Phase | Obligation |
+|---|---|---|---|
+| 1 | Before any test runs | `mutant` | `MutantBootstrap.activateFromSystemProperties()` — activates the fork's mutant AND loads `catalog.json` into this JVM's catalog (fork-side handoff). Throws if the activated mutant is unknown; **never swallow it**. |
+| 2 | After all tests ran | `baseline` | `MutationCatalogIo.writeCatalogJson(outputDir, MutationCatalogAccess.allEntries())` — the baseline fork hands Discovery's catalog to the coordinator. |
+| 3 | After all tests ran | `mutant` | If `AppliedMutantTracker.lastOrNull() == activeMutant`, write `AppliedMarkerStore.write(outputDir, activeMutant)`; otherwise throw. A mutation that never executed must never be classified KILLED or SURVIVED. |
+
+`outputDir` is `MutantBootstrap.outputDirectoryOrNull()`. Optional:
+`TestContextTracker.setCurrentTestId(...)` / `clearCurrentTestId()` around each
+test enables test-impact mapping (`mappedTestIds`), which the coordinator uses
+as the per-mutant `-Dtest=` filter.
+
+Failing loudly is part of the contract. A harness that swallows an unknown-
+mutant error or skips the marker turns a broken handoff into "every mutant
+survived" — the single worst failure mode this tool can produce. When in doubt,
+crash the fork.
+
+Two boundaries of the contract: (a) it covers the **externally-orchestrated**
+(Maven plugin) path — a self-orchestrated loop like the JUnit 5 extension's
+standalone mode is an optional extra, not an obligation; (b) the coordinator,
+not the harness, writes outcomes and final reports — the harness only ever
+writes `catalog.json` and applied markers.
+
+---
+
 ## Current status
 
 Working end-to-end: PySpark (pytest plugin), the Spark 3.5.x / Scala 2.12 + 2.13
 shims with Join / Filter / Aggregate / Window / Null-Coalesce / Project mutators,
-and the Maven plugin + JUnit 5 in-process paths. The ScalaTest bridge and the
-JVM end-to-end survival/kill examples are the next deliverables.
+the Maven plugin + JUnit 5 paths, and the JVM survival/kill examples (WP-15).
+The ScalaTest bridge is specified as WP-18 (`mutator-scalatest`); WP-17 tightens
+discovery to a single plan shape and adds the applied-mutation honesty guard.

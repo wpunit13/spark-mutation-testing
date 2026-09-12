@@ -51,6 +51,15 @@ public final class MutationCatalogAccess {
     }
 
     /**
+     * Seeds the in-memory catalog from externally-supplied metadata — the
+     * fork-side half of the cross-process catalog handoff (see
+     * {@link MutationCatalogIo}). Idempotent: existing entries are kept.
+     */
+    public static void loadCatalog(Collection<MutantMetadata> entries) {
+        InMemoryMutationCatalog.getInstance().loadAll(entries);
+    }
+
+    /**
      * Returns the full Discovery-phase mutant catalog as a JSON array string.
      * Called once, after the baseline phase completes, before the mutation
      * loop begins.

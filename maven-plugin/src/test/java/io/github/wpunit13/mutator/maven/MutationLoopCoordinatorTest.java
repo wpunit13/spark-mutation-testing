@@ -111,7 +111,7 @@ class MutationLoopCoordinatorTest {
                 MojoFailureException.class,
                 coordinator::execute);
 
-        assertEquals("Baseline test suite failed. Mutation testing aborted.", ex.getMessage());
+        assertTrue(ex.getMessage().startsWith("Baseline test suite failed. Mutation testing aborted."));
         // Nothing was written because the baseline failed before any mutant ran.
         assertFalse(Files.exists(tempDir.resolve("catalog.json")));
     }

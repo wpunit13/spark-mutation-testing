@@ -7,6 +7,7 @@ import org.apache.maven.plugin.MojoExecution;
 import org.apache.maven.plugin.MojoExecutionException;
 import org.apache.maven.plugin.MojoFailureException;
 import org.apache.maven.plugin.descriptor.MojoDescriptor;
+import org.apache.maven.plugin.descriptor.Parameter;
 import org.apache.maven.project.MavenProject;
 import org.codehaus.plexus.util.xml.Xpp3Dom;
 import org.eclipse.aether.repository.RemoteRepository;
@@ -111,6 +112,26 @@ public class SurefireExecutor {
         ensureDefaultParameter(config, "reportsDirectory", "${project.build.directory}/surefire-reports", null);
         ensureDefaultParameter(config, "workingDirectory", null, "${basedir}");
         ensureDefaultParameter(config, "shutdown", "exit", "exit");
+
+        //
+        // Bridge EVERY remaining mojo parameter default straight from the
+        // loaded plugin descriptor. Programmatic invocation bypasses the
+        // lifecycle binder that normally populates these, and surefire 3.x
+        // validates some (e.g. tempDir) as non-blank — a hand-maintained list
+        // can never be complete, so derive it from the descriptor instead.
+        //
+        for (Parameter p : mojoDescriptor.getParameters()) {
+            if (config.getChild(p.getName()) != null) {
+                continue;
+            }
+            String def = p.getDefaultValue() != null ? p.getDefaultValue() : p.getExpression();
+            if (def == null || def.isBlank()) {
+                continue;
+            }
+            Xpp3Dom node = new Xpp3Dom(p.getName());
+            node.setAttribute("default-value", def);
+            config.addChild(node);
+        }
 
         // Apply dynamic system properties
         if (request.getSystemProperties() != null && !request.getSystemProperties().isEmpty()) {

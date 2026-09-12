@@ -76,7 +76,11 @@ public class MutationLoopCoordinator {
                 0L));
 
         if (!baselineResult.isSuccess()) {
-            throw new MojoFailureException("Baseline test suite failed. Mutation testing aborted.");
+            String detail = baselineResult.getFailureDetail() != null
+                    ? " Reason: " + baselineResult.getFailureDetail()
+                    : "";
+            throw new MojoFailureException(
+                    "Baseline test suite failed. Mutation testing aborted." + detail);
         }
 
         long timeoutMillis = baselineResult.getElapsedMillis() > 0
