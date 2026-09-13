@@ -239,8 +239,10 @@ The engine is test-framework agnostic: it hooks Spark via `spark.sql.extensions`
 and runs whenever a query is analyzed, whatever code drove the query. What IS
 framework-specific is the **harness** — the glue that bridges the fork boundary
 inside a test framework's lifecycle. `mutator-junit5` ships that glue for
-JUnit 5 (`SparkMutatorExtension`); `mutator-scalatest` ships it for ScalaTest
-(WP-18, `SparkMutatorBeforeAfterAll`). Any other framework (TestNG, Spock, a
+JUnit 5 (`SparkMutatorExtension`). The ScalaTest bridge (`mutator-scalatest`,
+WP-18, `SparkMutatorBeforeAfterAll`) is designed but **not yet implemented** —
+for the current Scala support story see [`SCALA_PIPELINES.md`](SCALA_PIPELINES.md).
+Any other framework (TestNG, Spock, a
 custom runner) implements the same contract against public `mutator-core` APIs:
 
 | # | When | Phase | Obligation |
@@ -272,5 +274,8 @@ writes `catalog.json` and applied markers.
 Working end-to-end: PySpark (pytest plugin), the Spark 3.5.x / Scala 2.12 + 2.13
 shims with Join / Filter / Aggregate / Window / Null-Coalesce / Project mutators,
 the Maven plugin + JUnit 5 paths, and the JVM survival/kill examples (WP-15).
-The ScalaTest bridge is specified as WP-18 (`mutator-scalatest`); WP-17 tightens
-discovery to a single plan shape and adds the applied-mutation honesty guard.
+The ScalaTest bridge is specified as WP-18 (`mutator-scalatest`) but deferred:
+its planned discovery runner (`org.scalatest.junit.JUnitRunner`) does not exist
+in the managed ScalaTest 3.2.18 — status, evidence, and the resume plan live in
+[`SCALA_PIPELINES.md`](SCALA_PIPELINES.md). WP-17 tightens discovery to a
+single plan shape and adds the applied-mutation honesty guard.

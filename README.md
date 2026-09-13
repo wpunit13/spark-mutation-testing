@@ -199,6 +199,7 @@ docs/                  core idea, architecture, contracts
 - [Core idea](docs/core_idea.md) — the vision and requirements.
 - [Architecture](docs/ARCHITECTURE.md) — how it's built.
 - [Developer guide](docs/developer-guide.md) — orchestration modes, fork-boundary protocol, config, and the quality gate.
+- [Scala pipelines](docs/SCALA_PIPELINES.md) — Scala-based Spark pipeline support (JUnit 5 today; ScalaTest status).
 - [Contracts](docs/CONTRACTS.md) — the frozen API surface (contributor reference).
 - [Adding a Spark version](docs/VERSION_ADDITION_SOP.md) — the runbook for a new shim.
 
