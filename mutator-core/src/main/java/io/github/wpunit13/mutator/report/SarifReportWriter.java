@@ -30,16 +30,26 @@ public final class SarifReportWriter {
 
     /**
      * Fixed lookup table: operatorType + mutationIndex -> mutator name.
-     * Any unlisted combination falls back to "UnknownMutator".
+     * Covers every (operatorType, mutationIndex) the Spark 3.5 shim's
+     * classify() can emit; any unlisted combination falls back to
+     * "UnknownMutator". Kept in sync with the pytest plugin's _MUTATOR_NAMES
+     * duplicate and scripts/validate_sarif.py.
      */
-    private static final Map<String, String> MUTATOR_NAMES = Map.of(
-            "JOIN|0", "JoinTypeToLeftOuterMutator",
-            "JOIN|1", "CrossJoinMutator",
-            "JOIN|2", "JoinTypeToLeftAntiMutator",
-            "FILTER|0", "FilterKeepLeftConjunctMutator",
-            "FILTER|1", "FilterKeepRightConjunctMutator",
-            "FILTER|2", "FilterAlwaysFalseMutator",
-            "FILTER|3", "FilterPredicateInversionMutator");
+    private static final Map<String, String> MUTATOR_NAMES = Map.ofEntries(
+            Map.entry("JOIN|0", "JoinTypeToLeftOuterMutator"),
+            Map.entry("JOIN|1", "CrossJoinMutator"),
+            Map.entry("JOIN|2", "JoinTypeToLeftAntiMutator"),
+            Map.entry("FILTER|0", "FilterKeepLeftConjunctMutator"),
+            Map.entry("FILTER|1", "FilterKeepRightConjunctMutator"),
+            Map.entry("FILTER|2", "FilterAlwaysFalseMutator"),
+            Map.entry("FILTER|3", "FilterPredicateInversionMutator"),
+            Map.entry("AGGREGATE|0", "AggregateSwapFunctionMutator"),
+            Map.entry("AGGREGATE|1", "AggregateDropGroupingKeyMutator"),
+            Map.entry("AGGREGATE|2", "AggregateZeroMutator"),
+            Map.entry("WINDOW|0", "WindowOrderInversionMutator"),
+            Map.entry("WINDOW|1", "WindowFrameTruncationMutator"),
+            Map.entry("PROJECT|0", "ProjectCoalesceBypassMutator"),
+            Map.entry("PROJECT|1", "ProjectInjectNullMutator"));
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 

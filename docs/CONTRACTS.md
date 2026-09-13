@@ -558,3 +558,10 @@ entirely (SARIF is a CI-gating surfaced-problems format; a killed mutant is
 not a problem to surface). `ERRORED` mutants are emitted at `level: "error"`
 so tooling can distinguish "the suite has a gap" from "the tool itself
 failed" in CI annotations.
+
+Known limitation: until Test Impact Analysis (§1.2) wires the file-path
+hint, `filePath` is the sentinel `"unknown"` and `lineNumber` is `-1`, so
+SARIF results carry `uri: "unknown"` and omit `region`. The hint is a direct
+input to `computeMutantId`, so wiring it per test class would mint multiple
+mutantIds for one logical mutation; consumers should therefore key on
+`ruleId`/`level` until lineage capture makes the URI meaningful.
