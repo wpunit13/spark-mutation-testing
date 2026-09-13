@@ -4,8 +4,9 @@ This is the authoritative guide for building against, configuring, and operating
 the JVM side of `spark-mutator`. It documents the two orchestration modes, the
 fork-boundary protocol, the configuration/system-property surface, and the
 quality gate. Read [`core_idea.md`](core_idea.md) for the vision,
-[`ARCHITECTURE.md`](ARCHITECTURE.md) for the mechanics, and
-[`CONTRACTS.md`](CONTRACTS.md) for the frozen API surface.
+[`ARCHITECTURE.md`](ARCHITECTURE.md) for the mechanics,
+[`CONTRACTS.md`](CONTRACTS.md) for the frozen API surface, and
+[`RELEASING.md`](RELEASING.md) for the release runbook.
 
 ---
 

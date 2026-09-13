@@ -129,13 +129,13 @@ the whole point.** See `examples/pyspark-pipeline/` for a runnable proof.
 
 ## Implemented today
 
-- **PySpark**, end-to-end, via the `pytest` plugin.
-- **Spark 3.5.x / Scala 2.13** shim.
-- **Join** mutators — `INNER → LEFT`, `CROSS`, `ANTI`.
-- **Filter** mutators — `A ∧ B → A`, `B`, `false`, `¬P`.
+- **PySpark**, end-to-end, via the `pytest` plugin (baseline, fail-fast loop, timeout watchdog, circuit breaker).
+- **Java & Scala pipelines**, end-to-end, via the Maven plugin (`spark-mutation-testing:mutate`) and the JUnit 5 bridge (`mutator-junit5`).
+- **Spark 3.5.x / Scala 2.12 + 2.13** shims.
+- **Mutator families** — Join (`INNER → LEFT`/`CROSS`/`ANTI`), Filter (`A ∧ B → A`/`B`/`false`/`¬P`), Aggregate, Window, Null-Coalesce, Project.
 
-The Java/Scala Maven-plugin path and further mutators (aggregate, window,
-null/type) are on the roadmap — see [`docs/core_idea.md`](docs/core_idea.md).
+Planned next: the Spark-version matrix with a CI matrix, first-class ScalaTest
+support (WP-18, deferred), and governance gates.
 
 ---
 
@@ -187,9 +187,11 @@ python scripts/verify_e2e.py
 ```
 mutator-core/          Java   — registry, hashing, catalog, reports (zero Spark imports)
 catalyst-interceptor/  Scala  — Catalyst rule + versioned Spark shims
+mutator-junit5/        Java   — JUnit 5 extension (in-process + bridge modes)
+maven-plugin/          Java   — Maven plugin: fork-per-mutant orchestration for Java & Scala
 python/                Python — pytest plugin, Py4J bridge, watchdog, circuit breaker
-examples/              runnable verification pipelines
-docs/                  core idea, architecture, contracts
+examples/              runnable verification pipelines (pyspark, spark-java, spark-scala)
+docs/                  core idea, architecture, contracts, guides, work packages
 ```
 
 ---
@@ -199,6 +201,7 @@ docs/                  core idea, architecture, contracts
 - [Core idea](docs/core_idea.md) — the vision and requirements.
 - [Architecture](docs/ARCHITECTURE.md) — how it's built.
 - [Developer guide](docs/developer-guide.md) — orchestration modes, fork-boundary protocol, config, and the quality gate.
+- [Releasing](docs/RELEASING.md) — the release runbook: version model, the ritual, guard rails.
 - [Scala pipelines](docs/SCALA_PIPELINES.md) — Scala-based Spark pipeline support (JUnit 5 today; ScalaTest status).
 - [Contracts](docs/CONTRACTS.md) — the frozen API surface (contributor reference).
 - [Adding a Spark version](docs/VERSION_ADDITION_SOP.md) — the runbook for a new shim.
@@ -207,5 +210,6 @@ docs/                  core idea, architecture, contracts
 
 ## Status
 
-Active development. PySpark on Spark 3.5.x is usable end-to-end; more Spark
-versions and mutator categories are in progress.
+Active development. PySpark, Java, and Scala (JUnit 5-in-Scala) pipelines on
+Spark 3.5.x are usable end-to-end; the Spark-version matrix, the ScalaTest
+bridge, and governance gates are planned.
