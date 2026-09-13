@@ -1,10 +1,12 @@
 # Project Specification: Spark Semantic Mutation Testing Engine (`spark-mutation-testing`)
 
 > **Note:** This is the *target* specification — the full vision and requirements,
-> not the current state. See the [README](../README.md) for what is implemented
-> today (PySpark on Spark 3.5.x with Join and Filter mutators). The
-> aggregate/window/null mutators and the Java/Scala Maven path are delivered in
-> later phases.
+> not the current state. For what is implemented today see the
+> [README](../README.md) and the "Current status" section of
+> [`developer-guide.md`](developer-guide.md). The aggregate/window/null mutators
+> and the Java/Scala Maven path called out for "later phases" below have since
+> been delivered; the Spark-version matrix, first-class ScalaTest support, and
+> the governance gates remain planned.
 
 ## 1. Overview & Problem Statement
 Traditional mutation testing tools (like PIT) operate on JVM bytecode and cannot evaluate distributed query semantics, while standard test suites often pass despite lacking coverage for join edge cases, filter drops, or window boundary changes. 
@@ -108,13 +110,14 @@ Add the plugin to `../pom.xml`:
 ```xml
 <plugin>
     <groupId>io.github.wpunit13</groupId>
-    <artifactId>spark-mutator-maven-plugin</artifactId>
-    <version>1.0.0</version>
+    <artifactId>spark-mutation-testing-maven-plugin</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
 </plugin>
 ```
+
 Execute:
 ```bash
-mvn spark-mutator:mutate
+mvn spark-mutation-testing:mutate
 ```
 
 ### For PySpark Pipelines

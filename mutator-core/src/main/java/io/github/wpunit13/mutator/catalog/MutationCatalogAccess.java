@@ -1,6 +1,5 @@
 package io.github.wpunit13.mutator.catalog;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -48,6 +47,15 @@ public final class MutationCatalogAccess {
     /** Test-only reset; delegates to the backing singleton. */
     public static void clearForTesting() {
         InMemoryMutationCatalog.getInstance().clearForTesting();
+    }
+
+    /**
+     * Seeds the in-memory catalog from externally-supplied metadata — the
+     * fork-side half of the cross-process catalog handoff (see
+     * {@link MutationCatalogIo}). Idempotent: existing entries are kept.
+     */
+    public static void loadCatalog(Collection<MutantMetadata> entries) {
+        InMemoryMutationCatalog.getInstance().loadAll(entries);
     }
 
     /**

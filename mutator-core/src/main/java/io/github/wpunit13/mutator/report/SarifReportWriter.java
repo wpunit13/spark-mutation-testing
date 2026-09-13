@@ -30,16 +30,26 @@ public final class SarifReportWriter {
 
     /**
      * Fixed lookup table: operatorType + mutationIndex -> mutator name.
-     * Any unlisted combination falls back to "UnknownMutator".
+     * Covers every (operatorType, mutationIndex) the Spark 3.5 shim's
+     * classify() can emit; any unlisted combination falls back to
+     * "UnknownMutator". Kept in sync with the pytest plugin's _MUTATOR_NAMES
+     * duplicate and scripts/validate_sarif.py.
      */
-    private static final Map<String, String> MUTATOR_NAMES = Map.of(
-            "JOIN|0", "JoinTypeToLeftOuterMutator",
-            "JOIN|1", "CrossJoinMutator",
-            "JOIN|2", "JoinTypeToLeftAntiMutator",
-            "FILTER|0", "FilterKeepLeftConjunctMutator",
-            "FILTER|1", "FilterKeepRightConjunctMutator",
-            "FILTER|2", "FilterAlwaysFalseMutator",
-            "FILTER|3", "FilterPredicateInversionMutator");
+    private static final Map<String, String> MUTATOR_NAMES = Map.ofEntries(
+            Map.entry("JOIN|0", "JoinTypeToLeftOuterMutator"),
+            Map.entry("JOIN|1", "CrossJoinMutator"),
+            Map.entry("JOIN|2", "JoinTypeToLeftAntiMutator"),
+            Map.entry("FILTER|0", "FilterKeepLeftConjunctMutator"),
+            Map.entry("FILTER|1", "FilterKeepRightConjunctMutator"),
+            Map.entry("FILTER|2", "FilterAlwaysFalseMutator"),
+            Map.entry("FILTER|3", "FilterPredicateInversionMutator"),
+            Map.entry("AGGREGATE|0", "AggregateSwapFunctionMutator"),
+            Map.entry("AGGREGATE|1", "AggregateDropGroupingKeyMutator"),
+            Map.entry("AGGREGATE|2", "AggregateZeroMutator"),
+            Map.entry("WINDOW|0", "WindowOrderInversionMutator"),
+            Map.entry("WINDOW|1", "WindowFrameTruncationMutator"),
+            Map.entry("PROJECT|0", "ProjectCoalesceBypassMutator"),
+            Map.entry("PROJECT|1", "ProjectInjectNullMutator"));
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
@@ -65,35 +75,7 @@ public final class SarifReportWriter {
                 .sorted(Comparator.comparing(MutantMetadata::getMutantId))
                 .toList();
         for (MutantMetadata meta : sorted) {
-            MutantResult result = results.get(meta.getMutantId());
-            if (result == null) {
-                continue;
-            }
-            MutantStatus status = result.getStatus();
-            String level;
-            if (status == MutantStatus.SURVIVED) {
-                level = "warning";
-            } else if (status == MutantStatus.ERRORED) {
-                level = "error";
-            } else {
-                // KILLED and TIMED_OUT (and SKIPPED) are omitted from SARIF.
-                continue;
-            }
-            ObjectNode sarifResult = sarifResults.addObject();
-            sarifResult.put("ruleId", mutatorNameFor(meta.getOperatorType(), meta.getMutationIndex()));
-            sarifResult.put("level", level);
-            ObjectNode message = sarifResult.putObject("message");
-            message.put("text", meta.getDescription());
-            ArrayNode locations = sarifResult.putArray("locations");
-            ObjectNode location = locations.addObject();
-            ObjectNode physicalLocation = location.putObject("physicalLocation");
-            ObjectNode artifactLocation = physicalLocation.putObject("artifactLocation");
-            artifactLocation.put("uri", meta.getFilePath());
-            // SARIF requires startLine >= 1; omit region entirely for unknown lines.
-            if (meta.getLineNumber() >= 1) {
-                ObjectNode region = physicalLocation.putObject("region");
-                region.put("startLine", meta.getLineNumber());
-            }
+            appendResultIfReportable(sarifResults, results.get(meta.getMutantId()), meta);
         }
 
         Path target = outputDir.resolve(FILE_NAME);
@@ -103,6 +85,45 @@ public final class SarifReportWriter {
                 MAPPER.writerWithDefaultPrettyPrinter().writeValueAsString(root) + "\n",
                 StandardCharsets.UTF_8);
         return target;
+    }
+
+    /**
+     * Emits one SARIF result for SURVIVED ("warning") and ERRORED ("error")
+     * mutants; every other status (and any catalogued mutant with no recorded
+     * outcome) is omitted.
+     */
+    private static void appendResultIfReportable(
+            ArrayNode sarifResults,
+            MutantResult result,
+            MutantMetadata meta) {
+        if (result == null) {
+            return;
+        }
+        MutantStatus status = result.getStatus();
+        String level;
+        if (status == MutantStatus.SURVIVED) {
+            level = "warning";
+        } else if (status == MutantStatus.ERRORED) {
+            level = "error";
+        } else {
+            // KILLED and TIMED_OUT (and SKIPPED) are omitted from SARIF.
+            return;
+        }
+        ObjectNode sarifResult = sarifResults.addObject();
+        sarifResult.put("ruleId", mutatorNameFor(meta.getOperatorType(), meta.getMutationIndex()));
+        sarifResult.put("level", level);
+        ObjectNode message = sarifResult.putObject("message");
+        message.put("text", meta.getDescription());
+        ArrayNode locations = sarifResult.putArray("locations");
+        ObjectNode location = locations.addObject();
+        ObjectNode physicalLocation = location.putObject("physicalLocation");
+        ObjectNode artifactLocation = physicalLocation.putObject("artifactLocation");
+        artifactLocation.put("uri", meta.getFilePath());
+        // SARIF requires startLine >= 1; omit region entirely for unknown lines.
+        if (meta.getLineNumber() >= 1) {
+            ObjectNode region = physicalLocation.putObject("region");
+            region.put("startLine", meta.getLineNumber());
+        }
     }
 
     private static String mutatorNameFor(OperatorTypeDto operatorType, int mutationIndex) {

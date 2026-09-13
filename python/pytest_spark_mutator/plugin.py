@@ -52,7 +52,8 @@ _SHELL_TOKEN = "pyspark-shell"
 
 # Duplicated from the JVM-side SARIF writer (SarifReportWriter.MUTATOR_NAMES,
 # key format "<operatorType>|<mutationIndex>"); must stay in sync with it.
-# Deliberately not fetched over the bridge.
+# Deliberately not fetched over the bridge. Unlisted combinations fall back
+# to UnknownMutator on the JVM side (SarifReportWriter's documented fallback).
 _MUTATOR_NAMES = {
     "JOIN|0": "JoinTypeToLeftOuterMutator",
     "JOIN|1": "CrossJoinMutator",
@@ -61,6 +62,13 @@ _MUTATOR_NAMES = {
     "FILTER|1": "FilterKeepRightConjunctMutator",
     "FILTER|2": "FilterAlwaysFalseMutator",
     "FILTER|3": "FilterPredicateInversionMutator",
+    "AGGREGATE|0": "AggregateSwapFunctionMutator",
+    "AGGREGATE|1": "AggregateDropGroupingKeyMutator",
+    "AGGREGATE|2": "AggregateZeroMutator",
+    "WINDOW|0": "WindowOrderInversionMutator",
+    "WINDOW|1": "WindowFrameTruncationMutator",
+    "PROJECT|0": "ProjectCoalesceBypassMutator",
+    "PROJECT|1": "ProjectInjectNullMutator",
 }
 _UNKNOWN_MUTATOR = "UnknownMutator"
 
@@ -105,7 +113,7 @@ def pytest_configure(config) -> None:
         config.getoption("--spark-mutate-config")
     )
     # Propagate output_dir to the JVM-side ReportSink, which resolves it from
-    # SPARK_MUTATOR_OUTPUT_DIR (then the spark.mutator.output.dir system
+    # SPARK_MUTATOR_OUTPUT_DIR (then the spark.mutator.outputDirectory system
     # property, then a default). Set it before the gateway JVM is lazily
     # launched, so the child process inherits it. Without this, the config's
     # output_dir was effectively ignored.
@@ -211,7 +219,13 @@ def pytest_sessionfinish(session, exitstatus) -> None:
             f"min_mutation_score {mut_session.config.min_mutation_score:.1f}%; "
             "failing the run."
         )
-        session.exitstatus = pytest.ExitCode.TESTS_FAILED
+        # WP-16 governance: a quality-gate breach is exit code 2, deliberately
+        # distinct from test assertion failures (1) so CI can route the two
+        # differently. Caveat: pytest itself uses 2 for "interrupted by user";
+        # the spec accepts the collision because the message above and the
+        # written reports disambiguate.
+        session.exitstatus = 2
+        return
 
 
 # ---------------------------------------------------------------------------

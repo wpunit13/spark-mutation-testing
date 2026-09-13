@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.regex.Pattern;
 import org.junit.jupiter.api.Test;
 
 class DeterministicHasherTest {
@@ -14,6 +15,9 @@ class DeterministicHasherTest {
     private static final String EMPTY_STRING_HASH = "e3b0c44298fc1c14";
     private static final String SPARK_MUTATOR_HASH = "6b4a1c1466633225";
     private static final String ORDERS_JOIN_1_HASH = "5186734e485702b6";
+
+    // Hoisted so the loop below does not recompile the pattern per iteration.
+    private static final Pattern LOWERCASE_HEX_16 = Pattern.compile("^[0-9a-f]{16}$");
 
     @Test
     void hashToHexEmptyStringMatchesGoldenValue() {
@@ -48,7 +52,7 @@ class DeterministicHasherTest {
         for (String input : inputs) {
             String hash = DeterministicHasher.hashToHex(input);
             assertEquals(16, hash.length(), "hash length for input: " + input);
-            assertTrue(hash.matches("^[0-9a-f]{16}$"), "hash format for input: " + input);
+            assertTrue(LOWERCASE_HEX_16.matcher(hash).matches(), "hash format for input: " + input);
         }
     }
 

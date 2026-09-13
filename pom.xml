@@ -19,6 +19,7 @@
   <modules>
     <module>mutator-core</module>
     <module>catalyst-interceptor</module>
+    <module>mutator-junit5</module>
     <module>maven-plugin</module>
   </modules>
 

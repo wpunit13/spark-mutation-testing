@@ -87,6 +87,19 @@ final class InMemoryMutationCatalog implements MutationCatalogSink {
         return List.copyOf(catalog.values());
     }
 
+    /**
+     * Restores externally-supplied entries — the fork-side half of the
+     * cross-process catalog handoff. A mutant fork never runs Discovery (that
+     * happened in the baseline fork, a different JVM), so the bridge loads
+     * {@code catalog.json} into this store before the Catalyst rule needs it.
+     * Existing entries are never overwritten.
+     */
+    void loadAll(Collection<MutantMetadata> entries) {
+        for (MutantMetadata entry : entries) {
+            catalog.putIfAbsent(entry.getMutantId(), entry);
+        }
+    }
+
     MutantMetadata findByIdOrNull(String mutantId) {
         return catalog.get(mutantId);
     }

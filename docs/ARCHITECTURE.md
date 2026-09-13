@@ -45,6 +45,11 @@ is left open, it is explicitly marked `[OPEN]`; everything else is fixed.
         └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
+> **Currently implemented shims:** `interceptor-spark-3.5_2.12` and
+> `interceptor-spark-3.5_2.13` only. The `3.4_2.12` and `4.0_2.13` cells in the
+> graph are *planned* targets (N-2 policy, spec §7.2) — they do **not** exist
+> yet; adding them follows [`VERSION_ADDITION_SOP.md`](VERSION_ADDITION_SOP.md).
+
 **Dependency direction is strictly one-way and acyclic:**
 `mutator-core` → nothing Spark-specific. `interceptor-api` → minimal Catalyst
 top-level types only (§5.1). `interceptor-spark-*` → concrete Catalyst
