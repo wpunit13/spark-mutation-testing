@@ -2,13 +2,16 @@ package io.github.wpunit13.mutator.junit5;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.wpunit13.mutator.AppliedMutantTracker;
 import io.github.wpunit13.mutator.MutantBootstrap;
 import io.github.wpunit13.mutator.MutantRegistry;
 import io.github.wpunit13.mutator.catalog.MutationCatalogAccess;
 import io.github.wpunit13.mutator.catalog.MutationCatalogIo;
+import io.github.wpunit13.mutator.report.AppliedMarkerStore;
 import io.github.wpunit13.mutator.report.ReportSink;
 import io.github.wpunit13.mutator.reset.SessionResetFacade;
 
+import java.io.IOException;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
@@ -223,13 +226,18 @@ public class SparkMutatorExtension implements
         // External orchestration (Maven Mojo): the extension is a bridge, not
         // an orchestrator. On baseline completion it serializes the discovered
         // catalog to the shared output directory so the Mojo (a different JVM)
-        // can read it back. Outcomes and reports are the Mojo's responsibility.
+        // can read it back. On mutant completion it persists the applied
+        // marker so the Mojo can distinguish "a test killed the mutant" from
+        // "the mutation never executed". Outcomes and reports are the Mojo's
+        // responsibility.
         if (MutantBootstrap.phaseOrNull() != null) {
             if (MutantBootstrap.PHASE_BASELINE.equals(MutantBootstrap.phaseOrNull())) {
                 String outputDir = MutantBootstrap.outputDirectoryOrNull();
                 if (outputDir != null) {
                     MutationCatalogIo.writeCatalogJson(Path.of(outputDir), MutationCatalogAccess.allEntries());
                 }
+            } else if (MutantBootstrap.PHASE_MUTANT.equals(MutantBootstrap.phaseOrNull())) {
+                writeAppliedMarkerOrThrow();
             }
             return;
         }
@@ -260,6 +268,43 @@ public class SparkMutatorExtension implements
         }
     }
 
+    /**
+     * Bridge-mode applied-mutation honesty guard (external {@code mutant}
+     * phase, after all tests ran).
+     *
+     * <p>The fork must prove that the active mutant's rewrite actually
+     * executed before the coordinator is allowed to classify the fork's exit
+     * code as KILLED or SURVIVED. The Catalyst rule records the applied fact
+     * in {@link AppliedMutantTracker} immediately after a rewrite; if the
+     * recorded id does not equal the fork's active mutant (system property,
+     * because {@code afterEach} already cleared the registry), the mutation
+     * never executed and this fork fails loudly instead of masquerading as a
+     * survivor. The marker is written only after the check passes.
+     */
+    private void writeAppliedMarkerOrThrow() {
+        String activeMutant = System.getProperty(MutantBootstrap.PROP_ACTIVE_MUTANT);
+        String applied = AppliedMutantTracker.lastOrNull();
+        if (activeMutant == null || activeMutant.isBlank() || !activeMutant.trim().equals(applied)) {
+            throw new IllegalStateException(
+                    "Mutation was not applied (coordinate matched no plan node): active mutant '"
+                            + activeMutant + "', last applied "
+                            + (applied == null ? "<none>" : "'" + applied + "'"));
+        }
+        String outputDir = MutantBootstrap.outputDirectoryOrNull();
+        if (outputDir == null || outputDir.isBlank()) {
+            throw new IllegalStateException(
+                    "Mutation '" + activeMutant + "' was applied but '"
+                            + MutantBootstrap.PROP_OUTPUT_DIRECTORY
+                            + "' is not set; cannot persist the applied marker.");
+        }
+        try {
+            AppliedMarkerStore.write(Path.of(outputDir), activeMutant.trim());
+        } catch (IOException e) {
+            throw new IllegalStateException(
+                    "Could not write applied marker for mutant '" + activeMutant + "'.", e);
+        }
+    }
+
     private void runInProcessMutations(ExtensionContext context) throws Exception {
         String catalogJson = MutationCatalogAccess.getFullCatalogJson();
         JsonNode catalogNode = MAPPER.readTree(catalogJson);
@@ -286,6 +331,9 @@ public class SparkMutatorExtension implements
             boolean errored = false;
 
             try {
+                // Honesty-guard baseline: forget the previous mutant's applied
+                // fact so a mismatch below can only come from THIS mutant.
+                AppliedMutantTracker.clear();
                 MutantRegistry.getInstance().setActiveMutant(mutantId);
                 cleanCatalystCache();
 
@@ -312,11 +360,17 @@ public class SparkMutatorExtension implements
             }
 
             long elapsed = System.currentTimeMillis() - start;
+            // A mutant whose rewrite never executed proves nothing: report it
+            // ERRORED instead of SURVIVED (a fake survivor corrupts the score).
+            boolean mutationApplied = mutantId.equals(AppliedMutantTracker.lastOrNull());
             try {
                 if (killed) {
                     ReportSink.recordOutcome(mutantId, "KILLED", elapsed, failureDetail);
                 } else if (errored) {
                     ReportSink.recordOutcome(mutantId, "ERRORED", elapsed, failureDetail);
+                } else if (!mutationApplied) {
+                    ReportSink.recordOutcome(mutantId, "ERRORED", elapsed,
+                            "mutation was not applied (coordinate matched no plan node)");
                 } else {
                     ReportSink.recordOutcome(mutantId, "SURVIVED", elapsed, null);
                 }

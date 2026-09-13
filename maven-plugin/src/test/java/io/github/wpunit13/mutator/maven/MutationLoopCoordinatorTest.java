@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.wpunit13.mutator.catalog.MutationCatalogIo;
 import io.github.wpunit13.mutator.model.MutantMetadata;
 import io.github.wpunit13.mutator.model.OperatorTypeDto;
+import io.github.wpunit13.mutator.report.AppliedMarkerStore;
 import org.apache.maven.plugin.MojoFailureException;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -17,6 +18,8 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -58,7 +61,10 @@ class MutationLoopCoordinatorTest {
     /**
      * Simulates the forked Surefire JVM: on the baseline request it writes
      * {@code catalog.json} (as the fork's bridge would), and on each mutant
-     * request returns the canned outcome for that mutant id.
+     * request it writes the applied marker for the mutants in
+     * {@code appliedMutantIds} (as the fork's bridge would after verifying
+     * {@code AppliedMutantTracker}) and returns the canned outcome for that
+     * mutant id.
      */
     private static class StubExecutor extends SurefireExecutor {
         private final List<SurefireRequest> requests = new ArrayList<>();
@@ -66,17 +72,25 @@ class MutationLoopCoordinatorTest {
         private final List<MutantMetadata> catalog;
         private final Map<String, SurefireResult> outcomes;
         private final long baselineElapsedMillis;
+        private final Set<String> appliedMutantIds;
 
         StubExecutor(Path outputDir, List<MutantMetadata> catalog, Map<String, SurefireResult> outcomes) {
             this(outputDir, catalog, outcomes, 100L);
         }
 
         StubExecutor(Path outputDir, List<MutantMetadata> catalog, Map<String, SurefireResult> outcomes, long baselineElapsedMillis) {
+            this(outputDir, catalog, outcomes, baselineElapsedMillis,
+                    catalog.stream().map(MutantMetadata::getMutantId).collect(Collectors.toSet()));
+        }
+
+        StubExecutor(Path outputDir, List<MutantMetadata> catalog, Map<String, SurefireResult> outcomes,
+                     long baselineElapsedMillis, Set<String> appliedMutantIds) {
             super();
             this.outputDir = outputDir;
             this.catalog = catalog;
             this.outcomes = outcomes;
             this.baselineElapsedMillis = baselineElapsedMillis;
+            this.appliedMutantIds = appliedMutantIds;
         }
 
         @Override
@@ -91,8 +105,79 @@ class MutationLoopCoordinatorTest {
                 return SurefireResult.success(baselineElapsedMillis);
             }
             String mutantId = request.getSystemProperties().get("spark.mutator.active.mutant");
+            if (appliedMutantIds.contains(mutantId)) {
+                try {
+                    AppliedMarkerStore.write(outputDir, mutantId);
+                } catch (IOException e) {
+                    throw new RuntimeException(e);
+                }
+            }
             return outcomes.getOrDefault(mutantId, SurefireResult.success(10L));
         }
+    }
+
+    @Test
+    void forkSuccessWithoutAppliedMarkerIsReclassifiedErrored() throws Exception {
+        // Pre-WP-17 this fork outcome classified as SURVIVED — the fake
+        // survivor that corrupted the mutation score. The missing applied
+        // marker proves the mutation never executed.
+        Map<String, SurefireExecutor.SurefireResult> outcomes = new LinkedHashMap<>();
+        outcomes.put(MUTANT_1, SurefireExecutor.SurefireResult.success(60L));
+
+        StubExecutor mockExecutor = new StubExecutor(
+                tempDir, List.of(meta(MUTANT_1, "OrdersPipelineTest#test1")), outcomes, 100L, Set.of());
+
+        MutationLoopCoordinator coordinator = new MutationLoopCoordinator(
+                mockExecutor, 2.0, tempDir.toFile(), 0.0);
+
+        MutationLoopCoordinator.MutationLoopResult result = coordinator.execute();
+
+        assertEquals(1, result.getErrored(), "not-applied mutant must be ERRORED");
+        assertEquals(0, result.getSurvived());
+        assertEquals(0, result.getKilled());
+        assertEquals(0, result.getTimedOut());
+
+        JsonNode outcome = mapper.readTree(
+                tempDir.resolve("outcomes").resolve(MUTANT_1 + ".json").toFile());
+        assertEquals("ERRORED", outcome.get("status").asText());
+        assertEquals("mutation was not applied (coordinate matched no plan node)",
+                outcome.get("failureDetailOrNull").asText());
+    }
+
+    @Test
+    void appliedMarkerWithFailureIsKilled() throws Exception {
+        Map<String, SurefireExecutor.SurefireResult> outcomes = new LinkedHashMap<>();
+        outcomes.put(MUTANT_1, SurefireExecutor.SurefireResult.failure(60L, "Expected [42] but found [0]", 1));
+
+        StubExecutor mockExecutor = new StubExecutor(
+                tempDir, List.of(meta(MUTANT_1, "OrdersPipelineTest#test1")), outcomes, 100L, Set.of(MUTANT_1));
+
+        MutationLoopCoordinator coordinator = new MutationLoopCoordinator(
+                mockExecutor, 2.0, tempDir.toFile(), 0.0);
+
+        MutationLoopCoordinator.MutationLoopResult result = coordinator.execute();
+
+        assertEquals(1, result.getKilled(), "marker present + test failure must be KILLED");
+        assertEquals(0, result.getErrored());
+        assertTrue(Files.exists(tempDir.resolve("applied").resolve(MUTANT_1 + ".json")),
+                "the fork's applied marker must be present");
+    }
+
+    @Test
+    void timeoutTakesPrecedenceOverMissingAppliedMarker() throws Exception {
+        Map<String, SurefireExecutor.SurefireResult> outcomes = new LinkedHashMap<>();
+        outcomes.put(MUTANT_1, SurefireExecutor.SurefireResult.timeout(250L, "Timed out after 200ms"));
+
+        StubExecutor mockExecutor = new StubExecutor(
+                tempDir, List.of(meta(MUTANT_1, "OrdersPipelineTest#test1")), outcomes, 100L, Set.of());
+
+        MutationLoopCoordinator coordinator = new MutationLoopCoordinator(
+                mockExecutor, 2.0, tempDir.toFile(), 0.0);
+
+        MutationLoopCoordinator.MutationLoopResult result = coordinator.execute();
+
+        assertEquals(1, result.getTimedOut(), "timeout must win over the missing marker");
+        assertEquals(0, result.getErrored());
     }
 
     @Test

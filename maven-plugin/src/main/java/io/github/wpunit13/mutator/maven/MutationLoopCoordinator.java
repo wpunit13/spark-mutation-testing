@@ -5,6 +5,7 @@ import io.github.wpunit13.mutator.catalog.MutationCatalogIo;
 import io.github.wpunit13.mutator.model.MutantMetadata;
 import io.github.wpunit13.mutator.model.MutantResult;
 import io.github.wpunit13.mutator.model.MutantStatus;
+import io.github.wpunit13.mutator.report.AppliedMarkerStore;
 import io.github.wpunit13.mutator.report.OutcomeFileStore;
 import io.github.wpunit13.mutator.report.ReportWriter;
 import org.apache.maven.plugin.MojoExecutionException;
@@ -35,7 +36,8 @@ import java.util.Objects;
  * </ol>
  *
  * <p>State crosses the process boundary exclusively through files under the
- * output directory: {@code catalog.json} (discovery: fork &rarr; orchestrator)
+ * output directory: {@code catalog.json} (discovery: fork &rarr; orchestrator),
+ * {@code applied/<id>.json} (applied-mutation markers: fork &rarr; orchestrator)
  * and {@code outcomes/<id>.json} (results: orchestrator writes, then merges).
  * The active-mutant directive crosses in the other direction via system
  * properties set on each fork launch.
@@ -187,12 +189,29 @@ public class MutationLoopCoordinator {
         return props;
     }
 
-    private static MutantResult classify(String mutantId, SurefireExecutor.SurefireResult r, long timeoutMillis) {
+    /**
+     * Classifies one mutant fork's terminal outcome, in this exact order:
+     * <ol>
+     *   <li>timeout &rarr; TIMED_OUT (the marker is irrelevant: a fork that
+     *       hung may have applied the mutation without finishing);</li>
+     *   <li>applied marker missing &rarr; ERRORED with the not-applied detail,
+     *       regardless of exit code — a mutation that never executed must
+     *       never be classified KILLED or SURVIVED (a fake survivor corrupts
+     *       the mutation score);</li>
+     *   <li>otherwise classify from the exit code as before (KILLED /
+     *       SURVIVED / ERRORED).</li>
+     * </ol>
+     */
+    private MutantResult classify(String mutantId, SurefireExecutor.SurefireResult r, long timeoutMillis) {
         long elapsed = r.getElapsedMillis();
         long now = System.currentTimeMillis();
         if (r.isTimeout() || elapsed > timeoutMillis) {
             String detail = r.getFailureDetail() != null ? r.getFailureDetail() : "timed out (> " + timeoutMillis + "ms)";
             return new MutantResult(mutantId, MutantStatus.TIMED_OUT, elapsed, detail, now);
+        }
+        if (!AppliedMarkerStore.exists(outputDirectory, mutantId)) {
+            return new MutantResult(mutantId, MutantStatus.ERRORED, elapsed,
+                    "mutation was not applied (coordinate matched no plan node)", now);
         }
         if (r.getExitCode() == 2) {
             // SurefireExecutor maps a non-MojoFailure exception to exit code 2:
