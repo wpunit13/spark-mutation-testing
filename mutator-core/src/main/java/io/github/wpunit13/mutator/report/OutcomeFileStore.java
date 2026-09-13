@@ -27,6 +27,10 @@ public final class OutcomeFileStore {
 
     public static final String OUTCOMES_DIR_NAME = "outcomes";
 
+    // Outcome-file JSON field names, shared by the write and read paths.
+    private static final String FIELD_STATUS = "status";
+    private static final String FIELD_FAILURE_DETAIL = "failureDetailOrNull";
+
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private OutcomeFileStore() {
@@ -45,12 +49,12 @@ public final class OutcomeFileStore {
 
         ObjectNode node = MAPPER.createObjectNode();
         node.put("mutantId", result.getMutantId());
-        node.put("status", result.getStatus().name());
+        node.put(FIELD_STATUS, result.getStatus().name());
         node.put("elapsedMillis", result.getElapsedMillis());
         if (result.getFailureDetailOrNull() == null) {
-            node.putNull("failureDetailOrNull");
+            node.putNull(FIELD_FAILURE_DETAIL);
         } else {
-            node.put("failureDetailOrNull", result.getFailureDetailOrNull());
+            node.put(FIELD_FAILURE_DETAIL, result.getFailureDetailOrNull());
         }
         node.put("recordedAtEpochMillis", result.getRecordedAtEpochMillis());
 
@@ -94,12 +98,12 @@ public final class OutcomeFileStore {
         }
         MutantStatus status;
         try {
-            status = MutantStatus.valueOf(node.path("status").asText());
+            status = MutantStatus.valueOf(node.path(FIELD_STATUS).asText());
         } catch (IllegalArgumentException | NullPointerException e) {
-            throw new IOException("Outcome file " + fileName + " has invalid status: " + node.path("status").asText());
+            throw new IOException("Outcome file " + fileName + " has invalid status: " + node.path(FIELD_STATUS).asText());
         }
         long elapsedMillis = node.path("elapsedMillis").asLong(0L);
-        JsonNode detailNode = node.get("failureDetailOrNull");
+        JsonNode detailNode = node.get(FIELD_FAILURE_DETAIL);
         String failureDetail = (detailNode == null || detailNode.isNull()) ? null : detailNode.asText();
         long recordedAt = node.path("recordedAtEpochMillis").asLong(0L);
         return new MutantResult(mutantId, status, elapsedMillis, failureDetail, recordedAt);

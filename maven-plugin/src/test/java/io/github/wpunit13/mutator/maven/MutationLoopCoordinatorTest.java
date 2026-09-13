@@ -10,7 +10,6 @@ import org.apache.maven.plugin.MojoFailureException;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
-import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -21,6 +20,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -474,8 +474,7 @@ class MutationLoopCoordinatorTest {
             mojo.setRepositorySystem(repoSystem);
             mojo.setRepositorySession(session);
 
-            mojo.execute();
-            // Execution should succeed without throwing exception
+            assertDoesNotThrow(mojo::execute);
         } finally {
             Files.deleteIfExists(tempJar);
         }

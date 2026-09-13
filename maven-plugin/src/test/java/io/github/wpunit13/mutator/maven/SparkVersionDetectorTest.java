@@ -13,6 +13,8 @@ import org.eclipse.aether.RepositorySystemSession;
 import org.eclipse.aether.resolution.ArtifactRequest;
 import org.eclipse.aether.resolution.ArtifactResult;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.io.File;
 import java.io.IOException;
@@ -24,7 +26,6 @@ import java.util.HashSet;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -82,11 +83,17 @@ class SparkVersionDetectorTest {
         assertEquals("io.github.wpunit13:interceptor-spark-3.5_2.12:1.0.0-SNAPSHOT", coordinate.getCoordinate());
     }
 
-    @Test
-    void testUnsupportedSparkVersion24ThrowsMojoExecutionException() {
+    @ParameterizedTest
+    @CsvSource({
+            "spark-sql_2.12, 2.4.8, 2.4_2.12, true",
+            "spark-sql_2.12, 3.4.1, 3.4_2.12, false",
+            "spark-sql_2.13, 4.0.0, 4.0_2.13, false"
+    })
+    void testUnsupportedSparkVersionThrowsMojoExecutionException(
+            String artifactId, String version, String combination, boolean assertSupportedVersionsListing) {
         SparkVersionDetector detector = new SparkVersionDetector();
         Set<Artifact> artifacts = Collections.singleton(
-                createArtifact("org.apache.spark", "spark-sql_2.12", "2.4.8")
+                createArtifact("org.apache.spark", artifactId, version)
         );
 
         MojoExecutionException ex = assertThrows(
@@ -94,42 +101,14 @@ class SparkVersionDetectorTest {
                 () -> detector.detect(artifacts)
         );
 
-        assertTrue(ex.getMessage().contains("Unsupported Spark/Scala combination '2.4_2.12'"),
+        assertTrue(ex.getMessage().contains("Unsupported Spark/Scala combination '" + combination + "'"),
                 "Message should state unsupported combination: " + ex.getMessage());
-        assertTrue(ex.getMessage().contains("Supported versions:"),
-                "Message should state supported versions: " + ex.getMessage());
-        assertTrue(ex.getMessage().contains("3.5_2.12") && ex.getMessage().contains("3.5_2.13"),
-                "Message should list all supported versions: " + ex.getMessage());
-    }
-
-    @Test
-    void testUnsupportedSparkVersion34ThrowsMojoExecutionException() {
-        SparkVersionDetector detector = new SparkVersionDetector();
-        Set<Artifact> artifacts = Collections.singleton(
-                createArtifact("org.apache.spark", "spark-sql_2.12", "3.4.1")
-        );
-
-        MojoExecutionException ex = assertThrows(
-                MojoExecutionException.class,
-                () -> detector.detect(artifacts)
-        );
-
-        assertTrue(ex.getMessage().contains("Unsupported Spark/Scala combination '3.4_2.12'"));
-    }
-
-    @Test
-    void testUnsupportedFutureSparkVersionThrowsMojoExecutionException() {
-        SparkVersionDetector detector = new SparkVersionDetector();
-        Set<Artifact> artifacts = Collections.singleton(
-                createArtifact("org.apache.spark", "spark-sql_2.13", "4.0.0")
-        );
-
-        MojoExecutionException ex = assertThrows(
-                MojoExecutionException.class,
-                () -> detector.detect(artifacts)
-        );
-
-        assertTrue(ex.getMessage().contains("Unsupported Spark/Scala combination '4.0_2.13'"));
+        if (assertSupportedVersionsListing) {
+            assertTrue(ex.getMessage().contains("Supported versions:"),
+                    "Message should state supported versions: " + ex.getMessage());
+            assertTrue(ex.getMessage().contains("3.5_2.12") && ex.getMessage().contains("3.5_2.13"),
+                    "Message should list all supported versions: " + ex.getMessage());
+        }
     }
 
     @Test

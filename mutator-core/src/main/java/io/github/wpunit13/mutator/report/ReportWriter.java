@@ -50,7 +50,9 @@ public final class ReportWriter {
                 case KILLED -> killed++;
                 case TIMED_OUT -> timedOut++;
                 case SURVIVED -> survived++;
-                default -> { } // ERRORED / SKIPPED are excluded
+                default -> {
+                    // ERRORED / SKIPPED are excluded from the score.
+                }
             }
         }
         return JsonReportWriter.mutationScore(killed, timedOut, survived);

@@ -55,6 +55,11 @@ public class SparkMutatorExtension implements
     public static final String PROPERTY_ACTIVE_MUTANT = "spark.mutator.active.mutant";
     public static final String EXTENSION_CLASS = "io.github.wpunit13.mutator.MutatorSparkExtension";
 
+    private static final String SPARK_SQL_EXTENSIONS = "spark.sql.extensions";
+    private static final String KEY_TEST_START_TIME = "testStartTime";
+    private static final String KEY_HANDLED_FAILURE = "handledFailure";
+    private static final String STATUS_ERRORED = "ERRORED";
+
     private static final ExtensionContext.Namespace NAMESPACE =
             ExtensionContext.Namespace.create(SparkMutatorExtension.class);
 
@@ -76,11 +81,11 @@ public class SparkMutatorExtension implements
     }
 
     private void ensureSparkExtensionActive() {
-        String existing = System.getProperty("spark.sql.extensions");
+        String existing = System.getProperty(SPARK_SQL_EXTENSIONS);
         if (existing == null || existing.isBlank()) {
-            System.setProperty("spark.sql.extensions", EXTENSION_CLASS);
+            System.setProperty(SPARK_SQL_EXTENSIONS, EXTENSION_CLASS);
         } else if (!existing.contains(EXTENSION_CLASS)) {
-            System.setProperty("spark.sql.extensions", existing + "," + EXTENSION_CLASS);
+            System.setProperty(SPARK_SQL_EXTENSIONS, existing + "," + EXTENSION_CLASS);
         }
     }
 
@@ -93,11 +98,11 @@ public class SparkMutatorExtension implements
             Object opt = sparkSessionClass.getMethod("getActiveSession").invoke(null);
             Method isDefined = opt.getClass().getMethod("isDefined");
             Object spark = null;
-            if ((Boolean) isDefined.invoke(opt)) {
+            if ((boolean) isDefined.invoke(opt)) {
                 spark = opt.getClass().getMethod("get").invoke(opt);
             } else {
                 Object defaultOpt = sparkSessionClass.getMethod("getDefaultSession").invoke(null);
-                if ((Boolean) isDefined.invoke(defaultOpt)) {
+                if ((boolean) isDefined.invoke(defaultOpt)) {
                     spark = defaultOpt.getClass().getMethod("get").invoke(defaultOpt);
                 }
             }
@@ -132,8 +137,8 @@ public class SparkMutatorExtension implements
 
         MutantBootstrap.activateFromSystemProperties();
 
-        getStore(context).put("testStartTime", System.currentTimeMillis());
-        getStore(context).remove("handledFailure");
+        getStore(context).put(KEY_TEST_START_TIME, System.currentTimeMillis());
+        getStore(context).remove(KEY_HANDLED_FAILURE);
         getStore(context).remove("failureDetail");
     }
 
@@ -154,25 +159,17 @@ public class SparkMutatorExtension implements
         String activeMutant = MutantRegistry.getInstance().getActiveMutantOrNull();
         if (activeMutant != null) {
             Throwable root = unwrap(throwable);
-            Long start = getStore(context).get("testStartTime", Long.class);
+            Long start = getStore(context).get(KEY_TEST_START_TIME, Long.class);
             long elapsed = start != null ? (System.currentTimeMillis() - start) : 0L;
             String failureDetail = root.getMessage() != null ? root.getMessage() : root.toString();
-            getStore(context).put("handledFailure", true);
+            getStore(context).put(KEY_HANDLED_FAILURE, true);
 
             if (root instanceof AssertionError) {
-                try {
-                    ReportSink.recordOutcome(activeMutant, "KILLED", elapsed, failureDetail);
-                } catch (IllegalStateException ignored) {
-                    // Already recorded
-                }
+                recordOutcomeQuietly(activeMutant, "KILLED", elapsed, failureDetail);
                 // Suppress AssertionError so test runner indicates mutant was successfully killed
                 return;
             } else {
-                try {
-                    ReportSink.recordOutcome(activeMutant, "ERRORED", elapsed, failureDetail);
-                } catch (IllegalStateException ignored) {
-                    // Already recorded
-                }
+                recordOutcomeQuietly(activeMutant, STATUS_ERRORED, elapsed, failureDetail);
                 throw throwable;
             }
         }
@@ -180,6 +177,14 @@ public class SparkMutatorExtension implements
         // In baseline mode, record baseline failure and let exception surface normally
         getStore(context).put("baselineFailed", true);
         throw throwable;
+    }
+
+    private void recordOutcomeQuietly(String mutantId, String status, long elapsed, String detail) {
+        try {
+            ReportSink.recordOutcome(mutantId, status, elapsed, detail);
+        } catch (IllegalStateException ignored) {
+            // Already recorded (write-once sink)
+        }
     }
 
     // 3. AfterEach: clear active mutant and clean Catalyst cache
@@ -192,18 +197,7 @@ public class SparkMutatorExtension implements
         String activeMutant = MutantRegistry.getInstance().getActiveMutantOrNull();
         try {
             if (activeMutant != null) {
-                Boolean handled = getStore(context).get("handledFailure", Boolean.class);
-                if (handled == null || !handled) {
-                    if (MutantBootstrap.phaseOrNull() == null) {
-                        Long start = getStore(context).get("testStartTime", Long.class);
-                        long elapsed = start != null ? (System.currentTimeMillis() - start) : 0L;
-                        try {
-                            ReportSink.recordOutcome(activeMutant, "SURVIVED", elapsed, null);
-                        } catch (IllegalStateException ignored) {
-                            // Already recorded
-                        }
-                    }
-                }
+                recordSurvivedIfUnhandled(context, activeMutant);
             }
         } finally {
             try {
@@ -213,6 +207,15 @@ public class SparkMutatorExtension implements
             } finally {
                 cleanCatalystCache();
             }
+        }
+    }
+
+    private void recordSurvivedIfUnhandled(ExtensionContext context, String activeMutant) {
+        Boolean handled = getStore(context).get(KEY_HANDLED_FAILURE, Boolean.class);
+        if ((handled == null || !handled) && MutantBootstrap.phaseOrNull() == null) {
+            Long start = getStore(context).get(KEY_TEST_START_TIME, Long.class);
+            long elapsed = start != null ? (System.currentTimeMillis() - start) : 0L;
+            recordOutcomeQuietly(activeMutant, "SURVIVED", elapsed, null);
         }
     }
 
@@ -305,82 +308,99 @@ public class SparkMutatorExtension implements
         }
     }
 
-    private void runInProcessMutations(ExtensionContext context) throws Exception {
-        String catalogJson = MutationCatalogAccess.getFullCatalogJson();
-        JsonNode catalogNode = MAPPER.readTree(catalogJson);
-
-        if (catalogNode == null || !catalogNode.isArray() || catalogNode.isEmpty()) {
+    private void runInProcessMutations(ExtensionContext context) throws IOException {
+        JsonNode catalogNode = readCatalogArrayOrNull();
+        if (catalogNode == null) {
             return;
         }
 
         Class<?> testClass = context.getRequiredTestClass();
 
         for (JsonNode mutantEntry : catalogNode) {
-            String mutantId = mutantEntry.get("mutantId").asText();
-            JsonNode mappedTestsNode = mutantEntry.get("mappedTestIds");
-            Set<String> mappedTestNames = new HashSet<>();
-            if (mappedTestsNode != null && mappedTestsNode.isArray()) {
-                for (JsonNode t : mappedTestsNode) {
-                    mappedTestNames.add(t.asText());
-                }
-            }
-
-            long start = System.currentTimeMillis();
-            boolean killed = false;
-            String failureDetail = null;
-            boolean errored = false;
-
-            try {
-                // Honesty-guard baseline: forget the previous mutant's applied
-                // fact so a mismatch below can only come from THIS mutant.
-                AppliedMutantTracker.clear();
-                MutantRegistry.getInstance().setActiveMutant(mutantId);
-                cleanCatalystCache();
-
-                executeTestsForMutant(testClass, mappedTestNames);
-            } catch (Throwable t) {
-                Throwable root = unwrap(t);
-                if (root instanceof AssertionError) {
-                    killed = true;
-                    failureDetail = root.getMessage() != null ? root.getMessage() : root.toString();
-                } else {
-                    errored = true;
-                    failureDetail = "Unhandled exception: " + root.toString();
-                }
-            } finally {
-                try {
-                    if (mutantId.equals(MutantRegistry.getInstance().getActiveMutantOrNull())) {
-                        MutantRegistry.getInstance().clearActiveMutant(mutantId);
-                    } else if (MutantRegistry.getInstance().getActiveMutantOrNull() != null) {
-                        MutantRegistry.getInstance().reset();
-                    }
-                } finally {
-                    cleanCatalystCache();
-                }
-            }
-
-            long elapsed = System.currentTimeMillis() - start;
-            // A mutant whose rewrite never executed proves nothing: report it
-            // ERRORED instead of SURVIVED (a fake survivor corrupts the score).
-            boolean mutationApplied = mutantId.equals(AppliedMutantTracker.lastOrNull());
-            try {
-                if (killed) {
-                    ReportSink.recordOutcome(mutantId, "KILLED", elapsed, failureDetail);
-                } else if (errored) {
-                    ReportSink.recordOutcome(mutantId, "ERRORED", elapsed, failureDetail);
-                } else if (!mutationApplied) {
-                    ReportSink.recordOutcome(mutantId, "ERRORED", elapsed,
-                            "mutation was not applied (coordinate matched no plan node)");
-                } else {
-                    ReportSink.recordOutcome(mutantId, "SURVIVED", elapsed, null);
-                }
-            } catch (IllegalStateException ignored) {
-                // Write-once
-            }
+            runSingleMutant(testClass, mutantEntry);
         }
     }
 
-    private void executeTestsForMutant(Class<?> testClass, Set<String> mappedTestNames) throws Throwable {
+    private JsonNode readCatalogArrayOrNull() throws IOException {
+        String catalogJson = MutationCatalogAccess.getFullCatalogJson();
+        JsonNode catalogNode = MAPPER.readTree(catalogJson);
+        if (catalogNode == null || !catalogNode.isArray() || catalogNode.isEmpty()) {
+            return null;
+        }
+        return catalogNode;
+    }
+
+    private void runSingleMutant(Class<?> testClass, JsonNode mutantEntry) {
+        String mutantId = mutantEntry.get("mutantId").asText();
+        Set<String> mappedTestNames = parseMappedTestNames(mutantEntry);
+
+        long start = System.currentTimeMillis();
+        boolean killed = false;
+        String failureDetail = null;
+        boolean errored = false;
+
+        try {
+            // Honesty-guard baseline: forget the previous mutant's applied
+            // fact so a mismatch below can only come from THIS mutant.
+            AppliedMutantTracker.clear();
+            MutantRegistry.getInstance().setActiveMutant(mutantId);
+            cleanCatalystCache();
+
+            executeTestsForMutant(testClass, mappedTestNames);
+        } catch (Throwable t) {
+            Throwable root = unwrap(t);
+            if (root instanceof AssertionError) {
+                killed = true;
+                failureDetail = root.getMessage() != null ? root.getMessage() : root.toString();
+            } else {
+                errored = true;
+                failureDetail = "Unhandled exception: " + root.toString();
+            }
+        } finally {
+            try {
+                if (mutantId.equals(MutantRegistry.getInstance().getActiveMutantOrNull())) {
+                    MutantRegistry.getInstance().clearActiveMutant(mutantId);
+                } else if (MutantRegistry.getInstance().getActiveMutantOrNull() != null) {
+                    MutantRegistry.getInstance().reset();
+                }
+            } finally {
+                cleanCatalystCache();
+            }
+        }
+
+        long elapsed = System.currentTimeMillis() - start;
+        recordMutantOutcome(mutantId, killed, errored, failureDetail, elapsed);
+    }
+
+    private Set<String> parseMappedTestNames(JsonNode mutantEntry) {
+        Set<String> mappedTestNames = new HashSet<>();
+        JsonNode mappedTestsNode = mutantEntry.get("mappedTestIds");
+        if (mappedTestsNode != null && mappedTestsNode.isArray()) {
+            for (JsonNode t : mappedTestsNode) {
+                mappedTestNames.add(t.asText());
+            }
+        }
+        return mappedTestNames;
+    }
+
+    private void recordMutantOutcome(
+            String mutantId, boolean killed, boolean errored, String failureDetail, long elapsed) {
+        // A mutant whose rewrite never executed proves nothing: report it
+        // ERRORED instead of SURVIVED (a fake survivor corrupts the score).
+        boolean mutationApplied = mutantId.equals(AppliedMutantTracker.lastOrNull());
+        if (killed) {
+            recordOutcomeQuietly(mutantId, "KILLED", elapsed, failureDetail);
+        } else if (errored) {
+            recordOutcomeQuietly(mutantId, STATUS_ERRORED, elapsed, failureDetail);
+        } else if (!mutationApplied) {
+            recordOutcomeQuietly(mutantId, STATUS_ERRORED, elapsed,
+                    "mutation was not applied (coordinate matched no plan node)");
+        } else {
+            recordOutcomeQuietly(mutantId, "SURVIVED", elapsed, null);
+        }
+    }
+
+    private void executeTestsForMutant(Class<?> testClass, Set<String> mappedTestNames) throws ReflectiveOperationException {
         Constructor<?> ctor = testClass.getDeclaredConstructor();
         ctor.setAccessible(true);
         Object testInstance = ctor.newInstance();
@@ -403,6 +423,7 @@ public class SparkMutatorExtension implements
                         after.setAccessible(true);
                         after.invoke(testInstance);
                     } catch (Throwable ignored) {
+                        // AfterEach cleanup must never mask the test method's own outcome
                     }
                 }
             }
@@ -422,12 +443,11 @@ public class SparkMutatorExtension implements
     private List<Method> findTestMethods(Class<?> testClass, Set<String> mappedTestNames) {
         List<Method> result = new ArrayList<>();
         for (Method m : testClass.getDeclaredMethods()) {
-            if (m.isAnnotationPresent(Test.class)) {
-                if (mappedTestNames.isEmpty()
+            if (m.isAnnotationPresent(Test.class)
+                    && (mappedTestNames.isEmpty()
                         || mappedTestNames.contains(m.getName())
-                        || mappedTestNames.contains(testClass.getName() + "#" + m.getName())) {
-                    result.add(m);
-                }
+                        || mappedTestNames.contains(testClass.getName() + "#" + m.getName()))) {
+                result.add(m);
             }
         }
         if (result.isEmpty()) {

@@ -20,6 +20,9 @@ public final class HtmlReportWriter {
 
     static final String FILE_NAME = "mutation-report.html";
 
+    private static final String SUMMARY_ITEM_CLOSE = "</span></div>";
+    private static final String TABLE_CELL_CLOSE = "</td>";
+
     private HtmlReportWriter() {
     }
 
@@ -77,13 +80,13 @@ public final class HtmlReportWriter {
                 .append("<h1>spark-mutator mutation report</h1>\n");
 
         html.append("<div class=\"summary\">")
-                .append("<div>Total mutants<span>").append(sorted.size()).append("</span></div>")
-                .append("<div>Mutation score<span>").append(score).append("</span></div>")
-                .append("<div>Killed<span>").append(killed).append("</span></div>")
-                .append("<div>Survived<span>").append(survived).append("</span></div>")
-                .append("<div>Timed out<span>").append(timedOut).append("</span></div>")
-                .append("<div>Errored<span>").append(errored).append("</span></div>")
-                .append("<div>Skipped<span>").append(skipped).append("</span></div>")
+                .append("<div>Total mutants<span>").append(sorted.size()).append(SUMMARY_ITEM_CLOSE)
+                .append("<div>Mutation score<span>").append(score).append(SUMMARY_ITEM_CLOSE)
+                .append("<div>Killed<span>").append(killed).append(SUMMARY_ITEM_CLOSE)
+                .append("<div>Survived<span>").append(survived).append(SUMMARY_ITEM_CLOSE)
+                .append("<div>Timed out<span>").append(timedOut).append(SUMMARY_ITEM_CLOSE)
+                .append("<div>Errored<span>").append(errored).append(SUMMARY_ITEM_CLOSE)
+                .append("<div>Skipped<span>").append(skipped).append(SUMMARY_ITEM_CLOSE)
                 .append("</div>\n");
 
         html.append("<table>\n<tr><th>Mutant ID</th><th>Operator</th><th>Description</th>")
@@ -95,11 +98,11 @@ public final class HtmlReportWriter {
             String location = meta.getFilePath() + ":" + meta.getLineNumber();
             html.append("<tr").append(rowClass).append(">")
                     .append("<td><code>").append(escape(meta.getMutantId())).append("</code></td>")
-                    .append("<td>").append(escape(meta.getOperatorType().name())).append("</td>")
-                    .append("<td>").append(escape(meta.getDescription())).append("</td>")
-                    .append("<td class=\"status\">").append(escape(status.name())).append("</td>")
+                    .append("<td>").append(escape(meta.getOperatorType().name())).append(TABLE_CELL_CLOSE)
+                    .append("<td>").append(escape(meta.getDescription())).append(TABLE_CELL_CLOSE)
+                    .append("<td class=\"status\">").append(escape(status.name())).append(TABLE_CELL_CLOSE)
                     .append("<td><code>").append(escape(location)).append("</code></td>")
-                    .append("<td>").append(meta.getMappedTestIds().size()).append("</td>")
+                    .append("<td>").append(meta.getMappedTestIds().size()).append(TABLE_CELL_CLOSE)
                     .append("</tr>\n");
         }
         html.append("</table>\n</body>\n</html>\n");

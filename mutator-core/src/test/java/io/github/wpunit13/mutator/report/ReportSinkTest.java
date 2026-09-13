@@ -86,7 +86,7 @@ class ReportSinkTest {
     }
 
     @Test
-    void finalizeReturnsExistingAbsolutePathAndWritesAllThreeArtifacts() throws Exception {
+    void finalizeReturnsExistingAbsolutePathAndWritesAllThreeArtifacts() {
         register("aaaaaaaaaaaaaaaa");
         System.setProperty(OUTPUT_DIR_PROPERTY, tempDir.toString());
 

@@ -31,7 +31,8 @@ class MutantMetadataTest {
     @Test
     void mappedTestIdsAreUnmodifiable() {
         MutantMetadata meta = metadata(List.of("t1"), "INNER -> CROSS");
-        assertThrows(UnsupportedOperationException.class, () -> meta.getMappedTestIds().add("t3"));
+        List<String> mappedTestIds = meta.getMappedTestIds();
+        assertThrows(UnsupportedOperationException.class, () -> mappedTestIds.add("t3"));
     }
 
     @Test

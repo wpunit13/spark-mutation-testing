@@ -83,9 +83,44 @@ public class MutateMojo extends AbstractMojo {
         getLog().info("Target interceptor coordinate: " + interceptorCoord.getCoordinate());
 
         // 2. Resolve interceptor artifact via Maven's RepositorySystem and Session
-        RepositorySystemSession effectiveSession = repoSession != null
-                ? repoSession
-                : (mavenSession != null ? mavenSession.getRepositorySession() : null);
+        File interceptorJar = resolveInterceptorJar(interceptorCoord);
+        getLog().info("Resolved interceptor JAR: " + interceptorJar.getAbsolutePath());
+
+        // 3. Configure Surefire
+        SurefireConfigurator surefireConfigurator = new SurefireConfigurator();
+        SurefireConfigurator.SurefireConfigResult configResult =
+                surefireConfigurator.configure(project, interceptorJar);
+
+        // 4. Log configured Surefire parameters
+        getLog().info("Configured Surefire argLine: " + configResult.getArgLine());
+        getLog().info("Configured Surefire additionalClasspathElements: "
+                + configResult.getAdditionalClasspathElements());
+
+        // 5. Execute Mutation Loop
+        if (coordinator == null && pluginManager == null && surefireExecutor == null) {
+            getLog().warn("BuildPluginManager is null; skipping mutation loop execution.");
+            return;
+        }
+
+        MutationLoopCoordinator.MutationLoopResult loopResult = runMutationLoop(resolveReportsDirectory());
+
+        getLog().info("Mutation testing finished: "
+                + loopResult.getKilled() + " killed, "
+                + loopResult.getSurvived() + " survived, "
+                + loopResult.getTimedOut() + " timed out, "
+                + loopResult.getErrored() + " errored. "
+                + "Mutation score: " + loopResult.getMutationScore() + "%");
+        getLog().info("Reports written to: " + loopResult.getReportPath());
+
+        enforceQualityGate(loopResult);
+    }
+
+    private File resolveInterceptorJar(SparkVersionDetector.InterceptorCoordinate interceptorCoord)
+            throws MojoExecutionException {
+        RepositorySystemSession effectiveSession = repoSession;
+        if (effectiveSession == null && mavenSession != null) {
+            effectiveSession = mavenSession.getRepositorySession();
+        }
 
         if (repoSystem == null || effectiveSession == null) {
             throw new MojoExecutionException(
@@ -118,25 +153,10 @@ public class MutateMojo extends AbstractMojo {
             throw new MojoExecutionException(
                     "Resolved interceptor JAR does not exist for '" + interceptorCoord.getCoordinate() + "'");
         }
+        return interceptorJar;
+    }
 
-        getLog().info("Resolved interceptor JAR: " + interceptorJar.getAbsolutePath());
-
-        // 3. Configure Surefire
-        SurefireConfigurator surefireConfigurator = new SurefireConfigurator();
-        SurefireConfigurator.SurefireConfigResult configResult =
-                surefireConfigurator.configure(project, interceptorJar);
-
-        // 4. Log configured Surefire parameters
-        getLog().info("Configured Surefire argLine: " + configResult.getArgLine());
-        getLog().info("Configured Surefire additionalClasspathElements: "
-                + configResult.getAdditionalClasspathElements());
-
-        // 5. Execute Mutation Loop
-        if (coordinator == null && pluginManager == null && surefireExecutor == null) {
-            getLog().warn("BuildPluginManager is null; skipping mutation loop execution.");
-            return;
-        }
-
+    private File resolveReportsDirectory() {
         File reportsDir = outputDirectory;
         if (reportsDir == null) {
             if (project.getBuild() != null && project.getBuild().getDirectory() != null) {
@@ -145,7 +165,11 @@ public class MutateMojo extends AbstractMojo {
                 reportsDir = new File("target", "spark-mutator-reports");
             }
         }
+        return reportsDir;
+    }
 
+    private MutationLoopCoordinator.MutationLoopResult runMutationLoop(File reportsDir)
+            throws MojoExecutionException, MojoFailureException {
         MutationLoopCoordinator effectiveCoordinator = coordinator;
         if (effectiveCoordinator == null) {
             SurefireExecutor executor = surefireExecutor != null
@@ -159,23 +183,16 @@ public class MutateMojo extends AbstractMojo {
             );
         }
 
-        MutationLoopCoordinator.MutationLoopResult loopResult;
         try {
-            loopResult = effectiveCoordinator.execute();
+            return effectiveCoordinator.execute();
         } catch (MojoFailureException e) {
             throw e;
         } catch (Exception e) {
             throw new MojoExecutionException("Mutation testing execution failed: " + e.getMessage(), e);
         }
+    }
 
-        getLog().info("Mutation testing finished: "
-                + loopResult.getKilled() + " killed, "
-                + loopResult.getSurvived() + " survived, "
-                + loopResult.getTimedOut() + " timed out, "
-                + loopResult.getErrored() + " errored. "
-                + "Mutation score: " + loopResult.getMutationScore() + "%");
-        getLog().info("Reports written to: " + loopResult.getReportPath());
-
+    private void enforceQualityGate(MutationLoopCoordinator.MutationLoopResult loopResult) throws MojoFailureException {
         if (minMutationScore > 0.0 && loopResult.getMutationScore() < minMutationScore) {
             throw new MojoFailureException(
                     "Mutation score (" + loopResult.getMutationScore()

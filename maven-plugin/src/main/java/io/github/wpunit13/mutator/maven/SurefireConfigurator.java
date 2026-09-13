@@ -37,6 +37,8 @@ public class SurefireConfigurator {
     public static final String FAILSAFE_ARTIFACT_ID = "maven-failsafe-plugin";
     public static final String FAILSAFE_PLUGIN_KEY = FAILSAFE_GROUP_ID + ":" + FAILSAFE_ARTIFACT_ID;
 
+    private static final String ARG_LINE = "argLine";
+
     /**
      * Configures Surefire for the given project using the resolved interceptor JAR file.
      */
@@ -71,46 +73,53 @@ public class SurefireConfigurator {
         List<String> configuredClasspath = updateAdditionalClasspathElements(surefireConfig, interceptorJarPaths);
 
         // Update any executions defined on the Surefire plugin
-        if (surefirePlugin.getExecutions() != null) {
-            for (PluginExecution execution : surefirePlugin.getExecutions()) {
-                if (execution.getConfiguration() instanceof Xpp3Dom) {
-                    updateArgLine((Xpp3Dom) execution.getConfiguration(), null);
-                    updateAdditionalClasspathElements((Xpp3Dom) execution.getConfiguration(), interceptorJarPaths);
-                }
-            }
-        }
+        configurePluginExecutions(surefirePlugin, interceptorJarPaths);
 
         // Also configure Failsafe if present
-        Plugin failsafePlugin = project.getPlugin(FAILSAFE_PLUGIN_KEY);
-        if (failsafePlugin != null) {
-            Xpp3Dom failsafeConfig = getOrCreateConfiguration(failsafePlugin);
-            updateArgLine(failsafeConfig, null);
-            updateAdditionalClasspathElements(failsafeConfig, interceptorJarPaths);
-            if (failsafePlugin.getExecutions() != null) {
-                for (PluginExecution execution : failsafePlugin.getExecutions()) {
-                    if (execution.getConfiguration() instanceof Xpp3Dom) {
-                        updateArgLine((Xpp3Dom) execution.getConfiguration(), null);
-                        updateAdditionalClasspathElements((Xpp3Dom) execution.getConfiguration(), interceptorJarPaths);
-                    }
-                }
-            }
-        }
+        configureFailsafeIfPresent(project, interceptorJarPaths);
 
         // Propagate property to project properties if argLine exists there
-        Properties props = project.getProperties();
-        if (props != null) {
-            props.setProperty(EXTENSION_PROPERTY, EXTENSION_CLASS);
-            if (props.containsKey("argLine")) {
-                String existing = props.getProperty("argLine");
-                if (existing == null || existing.isBlank()) {
-                    props.setProperty("argLine", EXTENSION_ARG);
-                } else if (!existing.contains(EXTENSION_ARG)) {
-                    props.setProperty("argLine", existing.trim() + " " + EXTENSION_ARG);
-                }
-            }
-        }
+        propagateExtensionProperty(project.getProperties());
 
         return new SurefireConfigResult(configuredArgLine, configuredClasspath);
+    }
+
+    private void configurePluginExecutions(Plugin plugin, List<String> interceptorJarPaths) {
+        if (plugin.getExecutions() == null) {
+            return;
+        }
+        for (PluginExecution execution : plugin.getExecutions()) {
+            if (execution.getConfiguration() instanceof Xpp3Dom executionConfig) {
+                updateArgLine(executionConfig, null);
+                updateAdditionalClasspathElements(executionConfig, interceptorJarPaths);
+            }
+        }
+    }
+
+    private void configureFailsafeIfPresent(MavenProject project, List<String> interceptorJarPaths) {
+        Plugin failsafePlugin = project.getPlugin(FAILSAFE_PLUGIN_KEY);
+        if (failsafePlugin == null) {
+            return;
+        }
+        Xpp3Dom failsafeConfig = getOrCreateConfiguration(failsafePlugin);
+        updateArgLine(failsafeConfig, null);
+        updateAdditionalClasspathElements(failsafeConfig, interceptorJarPaths);
+        configurePluginExecutions(failsafePlugin, interceptorJarPaths);
+    }
+
+    private void propagateExtensionProperty(Properties properties) {
+        if (properties == null) {
+            return;
+        }
+        properties.setProperty(EXTENSION_PROPERTY, EXTENSION_CLASS);
+        if (properties.containsKey(ARG_LINE)) {
+            String existing = properties.getProperty(ARG_LINE);
+            if (existing == null || existing.isBlank()) {
+                properties.setProperty(ARG_LINE, EXTENSION_ARG);
+            } else if (!existing.contains(EXTENSION_ARG)) {
+                properties.setProperty(ARG_LINE, existing.trim() + " " + EXTENSION_ARG);
+            }
+        }
     }
 
     private Plugin findOrCreatePlugin(MavenProject project, String groupId, String artifactId) {
@@ -130,9 +139,8 @@ public class SurefireConfigurator {
     }
 
     private Xpp3Dom getOrCreateConfiguration(Plugin plugin) {
-        Object configObj = plugin.getConfiguration();
-        if (configObj instanceof Xpp3Dom) {
-            return (Xpp3Dom) configObj;
+        if (plugin.getConfiguration() instanceof Xpp3Dom existingConfig) {
+            return existingConfig;
         }
         Xpp3Dom config = new Xpp3Dom("configuration");
         plugin.setConfiguration(config);
@@ -140,32 +148,35 @@ public class SurefireConfigurator {
     }
 
     private String updateArgLine(Xpp3Dom configuration, Properties properties) {
-        Xpp3Dom argLineNode = configuration.getChild("argLine");
-        String finalValue;
+        Xpp3Dom argLineNode = configuration.getChild(ARG_LINE);
         if (argLineNode == null) {
-            argLineNode = new Xpp3Dom("argLine");
-            String base = (properties != null && properties.containsKey("argLine"))
-                    ? properties.getProperty("argLine")
+            String base = (properties != null && properties.containsKey(ARG_LINE))
+                    ? properties.getProperty(ARG_LINE)
                     : null;
-            if (base != null && !base.isBlank()) {
-                finalValue = base.contains(EXTENSION_ARG) ? base : base.trim() + " " + EXTENSION_ARG;
-            } else {
-                finalValue = EXTENSION_ARG;
-            }
+            String finalValue = mergeExtensionArg(base);
+            argLineNode = new Xpp3Dom(ARG_LINE);
             argLineNode.setValue(finalValue);
             configuration.addChild(argLineNode);
-        } else {
-            String current = argLineNode.getValue();
-            if (current == null || current.isBlank()) {
-                finalValue = EXTENSION_ARG;
-            } else if (!current.contains(EXTENSION_ARG)) {
-                finalValue = current.trim() + " " + EXTENSION_ARG;
-            } else {
-                finalValue = current;
-            }
-            argLineNode.setValue(finalValue);
+            return finalValue;
         }
+        String finalValue = mergeExtensionArg(argLineNode.getValue());
+        argLineNode.setValue(finalValue);
         return finalValue;
+    }
+
+    /**
+     * Merges {@link #EXTENSION_ARG} into an argLine value: blank values are
+     * replaced outright, values already carrying the extension are kept
+     * verbatim, and anything else gets the extension appended.
+     */
+    private static String mergeExtensionArg(String existing) {
+        if (existing == null || existing.isBlank()) {
+            return EXTENSION_ARG;
+        }
+        if (existing.contains(EXTENSION_ARG)) {
+            return existing;
+        }
+        return existing.trim() + " " + EXTENSION_ARG;
     }
 
     private List<String> updateAdditionalClasspathElements(Xpp3Dom configuration, List<String> jarPaths) {

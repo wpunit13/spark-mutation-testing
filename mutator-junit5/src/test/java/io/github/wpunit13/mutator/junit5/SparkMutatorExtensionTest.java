@@ -11,7 +11,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.wpunit13.mutator.MutantRegistry;
 import io.github.wpunit13.mutator.catalog.MutationCatalogAccess;
 import io.github.wpunit13.mutator.report.ReportSink;
-import java.io.File;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import org.apache.spark.sql.Dataset;
@@ -82,7 +81,7 @@ class SparkMutatorExtensionTest {
     // -----------------------------------------------------------------------
 
     @EnableSparkMutationTesting
-    public static class WeakPipelineTestCase {
+    static class WeakPipelineTestCase {
         @Test
         void testWeak() {
             SparkSession session = SparkSession.getActiveSession().get();
@@ -93,7 +92,7 @@ class SparkMutatorExtensionTest {
     }
 
     @EnableSparkMutationTesting
-    public static class HardenedPipelineTestCase {
+    static class HardenedPipelineTestCase {
         @Test
         void testHardened() {
             SparkSession session = SparkSession.getActiveSession().get();
@@ -104,17 +103,21 @@ class SparkMutatorExtensionTest {
     }
 
     @EnableSparkMutationTesting
-    public static class CrashingPipelineTestCase {
+    static class CrashingPipelineTestCase {
         @Test
         void testCrash() {
             SparkSession session = SparkSession.getActiveSession().get();
-            session.range(0, 5).toDF("id").filter("id > 2").collectAsList();
+            // collectAsList never returns null, so this assertion cannot change
+            // the fixture's outcome: the RuntimeException below is the point.
+            assertNotNull(
+                    session.range(0, 5).toDF("id").filter("id > 2").collectAsList(),
+                    "pipeline must produce a result before the simulated crash");
             throw new RuntimeException("Simulated unhandled exception during test execution");
         }
     }
 
     @EnableSparkMutationTesting(enabled = false)
-    public static class DisabledPipelineTestCase {
+    static class DisabledPipelineTestCase {
         @Test
         void testDisabled() {
             SparkSession session = SparkSession.getActiveSession().get();

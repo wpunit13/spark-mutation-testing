@@ -75,35 +75,7 @@ public final class SarifReportWriter {
                 .sorted(Comparator.comparing(MutantMetadata::getMutantId))
                 .toList();
         for (MutantMetadata meta : sorted) {
-            MutantResult result = results.get(meta.getMutantId());
-            if (result == null) {
-                continue;
-            }
-            MutantStatus status = result.getStatus();
-            String level;
-            if (status == MutantStatus.SURVIVED) {
-                level = "warning";
-            } else if (status == MutantStatus.ERRORED) {
-                level = "error";
-            } else {
-                // KILLED and TIMED_OUT (and SKIPPED) are omitted from SARIF.
-                continue;
-            }
-            ObjectNode sarifResult = sarifResults.addObject();
-            sarifResult.put("ruleId", mutatorNameFor(meta.getOperatorType(), meta.getMutationIndex()));
-            sarifResult.put("level", level);
-            ObjectNode message = sarifResult.putObject("message");
-            message.put("text", meta.getDescription());
-            ArrayNode locations = sarifResult.putArray("locations");
-            ObjectNode location = locations.addObject();
-            ObjectNode physicalLocation = location.putObject("physicalLocation");
-            ObjectNode artifactLocation = physicalLocation.putObject("artifactLocation");
-            artifactLocation.put("uri", meta.getFilePath());
-            // SARIF requires startLine >= 1; omit region entirely for unknown lines.
-            if (meta.getLineNumber() >= 1) {
-                ObjectNode region = physicalLocation.putObject("region");
-                region.put("startLine", meta.getLineNumber());
-            }
+            appendResultIfReportable(sarifResults, results.get(meta.getMutantId()), meta);
         }
 
         Path target = outputDir.resolve(FILE_NAME);
@@ -113,6 +85,45 @@ public final class SarifReportWriter {
                 MAPPER.writerWithDefaultPrettyPrinter().writeValueAsString(root) + "\n",
                 StandardCharsets.UTF_8);
         return target;
+    }
+
+    /**
+     * Emits one SARIF result for SURVIVED ("warning") and ERRORED ("error")
+     * mutants; every other status (and any catalogued mutant with no recorded
+     * outcome) is omitted.
+     */
+    private static void appendResultIfReportable(
+            ArrayNode sarifResults,
+            MutantResult result,
+            MutantMetadata meta) {
+        if (result == null) {
+            return;
+        }
+        MutantStatus status = result.getStatus();
+        String level;
+        if (status == MutantStatus.SURVIVED) {
+            level = "warning";
+        } else if (status == MutantStatus.ERRORED) {
+            level = "error";
+        } else {
+            // KILLED and TIMED_OUT (and SKIPPED) are omitted from SARIF.
+            return;
+        }
+        ObjectNode sarifResult = sarifResults.addObject();
+        sarifResult.put("ruleId", mutatorNameFor(meta.getOperatorType(), meta.getMutationIndex()));
+        sarifResult.put("level", level);
+        ObjectNode message = sarifResult.putObject("message");
+        message.put("text", meta.getDescription());
+        ArrayNode locations = sarifResult.putArray("locations");
+        ObjectNode location = locations.addObject();
+        ObjectNode physicalLocation = location.putObject("physicalLocation");
+        ObjectNode artifactLocation = physicalLocation.putObject("artifactLocation");
+        artifactLocation.put("uri", meta.getFilePath());
+        // SARIF requires startLine >= 1; omit region entirely for unknown lines.
+        if (meta.getLineNumber() >= 1) {
+            ObjectNode region = physicalLocation.putObject("region");
+            region.put("startLine", meta.getLineNumber());
+        }
     }
 
     private static String mutatorNameFor(OperatorTypeDto operatorType, int mutationIndex) {

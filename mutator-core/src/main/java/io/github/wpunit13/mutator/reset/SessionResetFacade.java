@@ -20,6 +20,8 @@ public final class SessionResetFacade {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
+    private static final String CATALOG_METHOD = "catalog";
+
     private SessionResetFacade() {
     }
 
@@ -51,7 +53,7 @@ public final class SessionResetFacade {
             // Step 1: clear the cache manager. Spark's clearCache() returns
             // void and gives no count, so clearedCacheEntries is deliberately
             // reported as -1 rather than a fabricated number.
-            Object catalog = invoke(spark, "catalog");
+            Object catalog = invoke(spark, CATALOG_METHOD);
             invoke(catalog, "clearCache");
 
             // Step 2: safety net for raw persisted RDDs registered directly
@@ -61,12 +63,7 @@ public final class SessionResetFacade {
             // collection traversal fails on some future Spark version, we
             // record unpersistedRddCount as -1 and continue with the
             // remaining steps instead of aborting the whole reset.
-            int unpersistedRddCount = 0;
-            try {
-                unpersistedRddCount = unpersistPersistentRdds(spark);
-            } catch (ReflectiveOperationException | RuntimeException reflectionFailure) {
-                unpersistedRddCount = -1;
-            }
+            int unpersistedRddCount = unpersistPersistentRddsSafely(spark);
 
             // Step 3: invalidate session catalog metadata so stale resolved
             // CatalogTable/file-index fragments cannot be reused. The checklist
@@ -76,7 +73,7 @@ public final class SessionResetFacade {
             // invalidateAllCachedTables() (verified against Spark 3.5.3's
             // SessionCatalog.scala). Call the real method directly.
             Object sessionState = invoke(spark, "sessionState");
-            Object sessionCatalog = invoke(sessionState, "catalog");
+            Object sessionCatalog = invoke(sessionState, CATALOG_METHOD);
             invoke(sessionCatalog, "invalidateAllCachedTables");
 
             // Step 4: snapshot temp views and drop all temporary ones.
@@ -90,6 +87,19 @@ public final class SessionResetFacade {
             return MAPPER.writeValueAsString(json);
         } catch (Exception e) {
             throw new RuntimeException("Session reset sequence failed", e);
+        }
+    }
+
+    /**
+     * Step-2 wrapper: a failure while reflectively traversing the Scala
+     * collection (e.g. on a future Spark version) is recorded as -1 so the
+     * remaining reset steps still run.
+     */
+    private static int unpersistPersistentRddsSafely(Object spark) {
+        try {
+            return unpersistPersistentRdds(spark);
+        } catch (ReflectiveOperationException | RuntimeException reflectionFailure) {
+            return -1;
         }
     }
 
@@ -119,7 +129,7 @@ public final class SessionResetFacade {
      */
     private static List<String> dropTempViews(Object spark) throws ReflectiveOperationException {
         List<String> dropped = new ArrayList<>();
-        Object catalog = invoke(spark, "catalog");
+        Object catalog = invoke(spark, CATALOG_METHOD);
         Object tables = invoke(catalog, "listTables");
         java.util.List<?> rows = (java.util.List<?>) invoke(tables, "collectAsList");
         for (Object row : rows) {
