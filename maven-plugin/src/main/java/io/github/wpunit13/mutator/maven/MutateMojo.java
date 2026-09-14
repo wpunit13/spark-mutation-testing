@@ -20,6 +20,8 @@ import org.eclipse.aether.resolution.ArtifactResolutionException;
 import org.eclipse.aether.resolution.ArtifactResult;
 
 import java.io.File;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * Entry point for mutation testing of Java and Scala Spark pipelines:
@@ -30,6 +32,17 @@ import java.io.File;
  * {@code io.github.wpunit13:interceptor-spark-<major.minor>_<scala_ver>} artifact via the
  * Maven Resolver (Aether) API, configures Surefire's {@code argLine} and
  * {@code additionalClasspathElements}, and orchestrates the baseline/mutation loop.
+ *
+ * <p><b>Governance gate exit code (WP-19).</b> When {@code minMutationScore} is
+ * configured and the mutation score is below it, this mojo logs the failure and
+ * calls {@link System#exit(int) System.exit(2)} — a dedicated exit code, distinct
+ * from Maven's generic build-failure code 1, so CI can route the two differently.
+ * The reports are fully flushed to disk by the coordinator before the gate runs, so
+ * the artifact always survives the JVM termination. <b>Tradeoff:</b> the exit
+ * terminates the whole Maven JVM deliberately; in a multi-module reactor the
+ * remaining modules do not build. That is the accepted cost of a distinguishable
+ * governance exit code (a thrown {@code MojoFailureException} would be reported by
+ * Maven as exit code 1, indistinguishable from any other build failure).
  */
 @Mojo(
         name = "mutate",
@@ -64,6 +77,29 @@ public class MutateMojo extends AbstractMojo {
 
     @Parameter(property = "spark.mutator.minMutationScore", defaultValue = "0.0")
     private double minMutationScore = 0.0;
+
+    /**
+     * Module-path prefixes limiting which candidates Discovery registers (WP-19).
+     * Settable via {@code -Dspark.mutator.targetModules=a,b} or {@code <configuration>}
+     * (comma-separated on the command line; one element per {@code <targetModules>}).
+     * Empty means no filtering. The engine applies the filter against the
+     * current file-path hint, which no JVM-side harness feeds today — with the
+     * property set and no hint fed, Discovery registers nothing (fail-safe,
+     * with a single warning).
+     */
+    @Parameter(property = "spark.mutator.targetModules")
+    private List<String> targetModules = new ArrayList<>();
+
+    /**
+     * Operator types excluded from mutation (WP-19). Canonical keys are the
+     * {@code OperatorTypeDto} names — {@code JOIN}, {@code FILTER}, {@code AGGREGATE},
+     * {@code WINDOW}, {@code PROJECT}, {@code OTHER} — case-insensitive. Exclusion is
+     * enforced engine-side (Discovery skips excluded operators; the rewrite path
+     * refuses them even with a stale catalog entry) and echoed into the report's
+     * {@code config.excludedMutators} block.
+     */
+    @Parameter(property = "spark.mutator.excludedMutators")
+    private List<String> excludedMutators = new ArrayList<>();
 
     private MutationLoopCoordinator coordinator;
     private SurefireExecutor surefireExecutor;
@@ -179,7 +215,9 @@ public class MutateMojo extends AbstractMojo {
                     executor,
                     timeoutMultiplier,
                     reportsDir,
-                    minMutationScore
+                    minMutationScore,
+                    targetModules,
+                    excludedMutators
             );
         }
 
@@ -192,12 +230,34 @@ public class MutateMojo extends AbstractMojo {
         }
     }
 
-    private void enforceQualityGate(MutationLoopCoordinator.MutationLoopResult loopResult) throws MojoFailureException {
+    /**
+     * Governance gate (WP-19): when the score is below the floor, the reports
+     * are already flushed (the coordinator writes them before returning), so
+     * the Mojo terminates the Maven JVM with the dedicated exit code 2 after
+     * logging the failure. See the class javadoc for the JVM-termination
+     * tradeoff.
+     */
+    private void enforceQualityGate(MutationLoopCoordinator.MutationLoopResult loopResult) {
         if (minMutationScore > 0.0 && loopResult.getMutationScore() < minMutationScore) {
-            throw new MojoFailureException(
-                    "Mutation score (" + loopResult.getMutationScore()
-                            + "%) is below minimum threshold (" + minMutationScore + "%).");
+            getLog().error("Quality gate FAILED: mutation score (" + loopResult.getMutationScore()
+                    + "%) is below minimum threshold (" + minMutationScore + "%).");
+            getLog().error("Reports are on disk at: " + loopResult.getReportPath());
+            exitWithGateFailure(GATE_FAILURE_EXIT_CODE);
         }
+    }
+
+    /**
+     * Dedicated governance-gate exit code (core_idea.md §8): "gate failed (2)"
+     * is distinguishable from Maven's generic "build failed (1)".
+     */
+    static final int GATE_FAILURE_EXIT_CODE = 2;
+
+    /**
+     * Terminates the Maven JVM with the governance-gate exit code. Package-private
+     * seam so tests can observe the exit code without killing the test JVM.
+     */
+    void exitWithGateFailure(int exitCode) {
+        System.exit(exitCode);
     }
 
     void setRepositorySystem(RepositorySystem repoSystem) {
@@ -236,6 +296,14 @@ public class MutateMojo extends AbstractMojo {
         this.minMutationScore = minMutationScore;
     }
 
+    void setTargetModules(List<String> targetModules) {
+        this.targetModules = targetModules;
+    }
+
+    void setExcludedMutators(List<String> excludedMutators) {
+        this.excludedMutators = excludedMutators;
+    }
+
     void setCoordinator(MutationLoopCoordinator coordinator) {
         this.coordinator = coordinator;
     }
@@ -266,6 +334,14 @@ public class MutateMojo extends AbstractMojo {
 
     double getMinMutationScore() {
         return minMutationScore;
+    }
+
+    List<String> getTargetModules() {
+        return targetModules;
+    }
+
+    List<String> getExcludedMutators() {
+        return excludedMutators;
     }
 
     MutationLoopCoordinator getCoordinator() {

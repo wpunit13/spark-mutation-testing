@@ -7,6 +7,7 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.util.Collection;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -25,7 +26,93 @@ public final class ReportWriter {
 
     private static final String NO_OUTCOME_DETAIL = "no outcome recorded; run terminated early";
 
+    /** Fork-directive / user-config keys shared with §3.1 (one key, both surfaces). */
+    private static final String PROP_TARGET_MODULES = "spark.mutator.targetModules";
+    private static final String PROP_EXCLUDED_MUTATORS = "spark.mutator.excludedMutators";
+    private static final String PROP_TIMEOUT_MULTIPLIER = "spark.mutator.timeoutMultiplier";
+    private static final String PROP_MIN_MUTATION_SCORE = "spark.mutator.minMutationScore";
+
     private ReportWriter() {
+    }
+
+    /**
+     * The run's configuration echo for the report's {@code config} block
+     * (schema §5.3). The block's fields already exist in the frozen schema;
+     * this value object populates them. Carried as a nested type so the
+     * writer pipeline gains config plumbing without a new top-level contract
+     * surface.
+     */
+    public static final class Config {
+
+        private final List<String> targetModules;
+        private final List<String> excludedMutators;
+        private final double timeoutMultiplier;
+        private final double minMutationScore;
+
+        public Config(
+                List<String> targetModules,
+                List<String> excludedMutators,
+                double timeoutMultiplier,
+                double minMutationScore) {
+            this.targetModules = targetModules == null ? List.of() : List.copyOf(targetModules);
+            this.excludedMutators = excludedMutators == null ? List.of() : List.copyOf(excludedMutators);
+            this.timeoutMultiplier = timeoutMultiplier;
+            this.minMutationScore = minMutationScore;
+        }
+
+        /**
+         * Resolves the config echo from the {@code spark.mutator.*} system
+         * properties — the one key across both surfaces (developer-guide
+         * §3.2). Used by the in-process report paths (the PySpark driver sets
+         * the properties from its TOML config; the JUnit 5 in-process gate
+         * documents {@code spark.mutator.minMutationScore}); unset keys fall
+         * back to the documented defaults (no filtering, multiplier 2.0,
+         * gate off).
+         */
+        public static Config fromSystemProperties() {
+            return new Config(
+                    splitCsv(System.getProperty(PROP_TARGET_MODULES)),
+                    splitCsv(System.getProperty(PROP_EXCLUDED_MUTATORS)),
+                    parseDouble(System.getProperty(PROP_TIMEOUT_MULTIPLIER), 2.0),
+                    parseDouble(System.getProperty(PROP_MIN_MUTATION_SCORE), 0.0));
+        }
+
+        private static List<String> splitCsv(String value) {
+            if (value == null || value.isBlank()) {
+                return List.of();
+            }
+            return java.util.Arrays.stream(value.split(","))
+                    .map(String::trim)
+                    .filter(s -> !s.isEmpty())
+                    .toList();
+        }
+
+        private static double parseDouble(String value, double fallback) {
+            if (value == null || value.isBlank()) {
+                return fallback;
+            }
+            try {
+                return Double.parseDouble(value.trim());
+            } catch (NumberFormatException e) {
+                return fallback;
+            }
+        }
+
+        public List<String> getTargetModules() {
+            return targetModules;
+        }
+
+        public List<String> getExcludedMutators() {
+            return excludedMutators;
+        }
+
+        public double getTimeoutMultiplier() {
+            return timeoutMultiplier;
+        }
+
+        public double getMinMutationScore() {
+            return minMutationScore;
+        }
     }
 
     /**
@@ -71,6 +158,19 @@ public final class ReportWriter {
             Path outputDir,
             Collection<MutantMetadata> catalog,
             Map<String, MutantResult> results) {
+        return writeReports(outputDir, catalog, results, Config.fromSystemProperties());
+    }
+
+    /**
+     * Same as {@link #writeReports(Path, Collection, Map)} with an explicit
+     * config echo. The Maven coordinator passes the values it orchestrated
+     * the run with; the in-process paths resolve them from system properties.
+     */
+    public static String writeReports(
+            Path outputDir,
+            Collection<MutantMetadata> catalog,
+            Map<String, MutantResult> results,
+            Config config) {
         Map<String, MutantResult> working = new LinkedHashMap<>(results);
         for (MutantMetadata meta : catalog) {
             working.putIfAbsent(
@@ -84,7 +184,7 @@ public final class ReportWriter {
         }
         Map<String, MutantResult> snapshot = Map.copyOf(working);
         try {
-            Path json = JsonReportWriter.write(outputDir, catalog, snapshot);
+            Path json = JsonReportWriter.write(outputDir, catalog, snapshot, config);
             SarifReportWriter.write(outputDir, catalog, snapshot);
             HtmlReportWriter.write(outputDir, catalog, snapshot);
             return json.toAbsolutePath().toString();

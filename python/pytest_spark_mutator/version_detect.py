@@ -12,7 +12,17 @@ from pathlib import Path
 
 from .exceptions import UnsupportedSparkVersionError
 
-VERSION_MATRIX: dict[str, str] = {"3.5_2.13": "interceptor-spark-3.5_2.13.jar"}
+# Every (Spark minor × Scala binary) cell with a built, bundled shim jar.
+# WP-19 adds the 3.5/2.12 cell: the sibling interceptor-bundle-2.12 module
+# produces interceptor-spark-3.5_2.12.jar alongside the 2.13 bundle, so a
+# 2.12-built PySpark distribution can mount its matching shim instead of
+# failing detection. Empirically verified 2026-09-13: the pyspark 3.5.9
+# distribution in the e2e environment bundles spark-core_2.13-3.5.3.jar, so
+# detection resolves 3.5_2.13 there and the JVM e2e is unaffected.
+VERSION_MATRIX: dict[str, str] = {
+    "3.5_2.13": "interceptor-spark-3.5_2.13.jar",
+    "3.5_2.12": "interceptor-spark-3.5_2.12.jar",
+}
 
 _SCALA_CORE_PATTERN = re.compile(r"^spark-core_(2\.12|2\.13)-.*\.jar$")
 

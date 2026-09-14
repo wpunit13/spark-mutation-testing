@@ -114,6 +114,8 @@ Set by `MutationLoopCoordinator` and read by `MutantBootstrap`
 | `spark.mutator.phase` | `baseline` \| `mutant` (or unset) | External orchestration marker. Unset ⇒ standalone in-process mode |
 | `spark.mutator.active.mutant` | 16-char lowercase hex | Which mutant is ACTIVE in this fork |
 | `spark.mutator.outputDirectory` | file path | Report/output directory (same key as the user-facing config — one key, both surfaces) |
+| `spark.mutator.targetModules` | comma-separated module-path prefixes | Discovery registers a candidate only when the current file-path hint starts with one of the prefixes. Blank/unset ⇒ no filtering. With the property set while the hint is still the default `unknown` (no harness fed one), NOTHING is registered and a single warning is emitted — fail-safe, because silent full-catalog behavior would be the "every mutant survived" failure mode in disguise |
+| `spark.mutator.excludedMutators` | comma-separated OperatorType names (`JOIN`, `FILTER`, `AGGREGATE`, `WINDOW`, `PROJECT`, `OTHER`; case-insensitive) | Discovery skips excluded operators; the match/rewrite path refuses them even if a stale catalog entry exists (observable skip, never an error). Unrecognized tokens are ignored with a one-time warning. The Python path additionally accepts legacy mutator display names, enforced in the pytest plugin |
 
 The bridge reads these once at JVM startup and drives `MutantRegistry`, so the
 activation logic is **framework-agnostic** (JUnit 5, ScalaTest, … all just call
@@ -129,6 +131,8 @@ declaration):
 | `outputDirectory` | `spark.mutator.outputDirectory` | `${project.build.directory}/spark-mutator-reports` | report dir |
 | `timeoutMultiplier` | `spark.mutator.timeoutMultiplier` | `2.0` | per-mutant deadline = `ceil(baseline × mult)` |
 | `minMutationScore` | `spark.mutator.minMutationScore` | `0.0` | score floor (`0.0` = gate off) |
+| `targetModules` | `spark.mutator.targetModules` | *(empty)* | comma-separated module-path prefixes limiting Discovery (see §3.1 for the engine-side semantics) |
+| `excludedMutators` | `spark.mutator.excludedMutators` | *(empty)* | comma-separated OperatorType names excluded from mutation; echoed into the report's `config.excludedMutators` |
 
 **In-process gate** (JUnit 5 path):
 
@@ -186,8 +190,9 @@ Errored and skipped mutants are excluded from both numerator and denominator.
 
 Both paths enforce the same floor, but through different channels:
 
-- **Maven plugin:** `MutateMojo` throws `MojoFailureException` when
-  `minMutationScore > 0.0 && score < minMutationScore` ⇒ Maven build fails.
+- **Maven plugin:** `MutateMojo` logs the failure and terminates the Maven JVM
+  with exit code 2 when `minMutationScore > 0.0 && score < minMutationScore`
+  (see the exit-code note below).
 - **In-process:** `SparkMutatorExtension.afterAll` throws
   `IllegalStateException` when `spark.mutator.minMutationScore` is set and
   `score < min` ⇒ JUnit container fails ⇒ Surefire exits non-zero.
@@ -197,12 +202,18 @@ fail". The in-process path writes the report *before* throwing, so a failing
 gate still leaves a CI artifact explaining the shortfall.
 
 The score is computed once in
-`mutator-core/.../report/ReportWriter.computeScore(...)`; the in-process path
-reaches it via `ReportSink.computeMutationScore()`.
+`mutator-core/.../report/ReportWriter.computeScore(...)` in both modes; the
+in-process path reaches it via `ReportSink.computeMutationScore()`.
 
-> **Exit-code note:** both paths currently fail with a generic non-zero exit
-> code (effectively `1`). A *specific* exit code `2` (as `core_idea.md` §8
-> hypothesizes) is deferred to the governance/quality-gates packet.
+> **Exit codes (WP-19):** the Maven plugin path terminates the Maven JVM with
+> the dedicated governance-gate exit code **2** when the gate fails — the
+> reports are already flushed to disk, so CI can distinguish "gate failed (2)"
+> from Maven's generic "build failed (1)". Tradeoff: the exit deliberately
+> kills the Maven JVM, so in a multi-module reactor the remaining modules do
+> not build (see `MutateMojo`'s javadoc). The pytest plugin path exits **2**
+> the same way, with the report finalized first. The JUnit 5 in-process path
+> CANNOT control Surefire's process exit code and stays a generic non-zero
+> failure — a known limitation, deliberately not faked.
 
 ---
 

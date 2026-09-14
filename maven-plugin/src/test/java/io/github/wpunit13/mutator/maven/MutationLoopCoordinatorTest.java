@@ -337,8 +337,18 @@ class MutationLoopCoordinatorTest {
     }
 
     @Test
-    void testMutateMojoThrowsWhenScoreBelowThreshold() throws Exception {
-        MutateMojo mojo = new MutateMojo();
+    void testMutateMojoExitsWithCode2WhenScoreBelowThreshold() throws Exception {
+        // WP-19: the gate no longer throws MojoFailureException — it logs the
+        // failure and terminates the JVM with the dedicated exit code 2. The
+        // exit is captured through the package-private seam so the test fork
+        // survives.
+        java.util.List<Integer> exitSink = new ArrayList<>();
+        MutateMojo mojo = new MutateMojo() {
+            @Override
+            void exitWithGateFailure(int exitCode) {
+                exitSink.add(exitCode);
+            }
+        };
         org.apache.maven.project.MavenProject project = new org.apache.maven.project.MavenProject();
         mojo.setProject(project);
         mojo.setMinMutationScore(80.0);
@@ -400,11 +410,9 @@ class MutationLoopCoordinatorTest {
             mojo.setRepositorySystem(repoSystem);
             mojo.setRepositorySession(session);
 
-            MojoFailureException ex = assertThrows(
-                    MojoFailureException.class,
-                    mojo::execute
-            );
-            assertTrue(ex.getMessage().contains("is below minimum threshold"));
+            assertDoesNotThrow(mojo::execute);
+            assertEquals(java.util.List.of(2), exitSink,
+                    "the gate must exit with the dedicated governance-gate code 2");
         } finally {
             Files.deleteIfExists(tempJar);
         }

@@ -381,6 +381,19 @@ public final class MutationCatalogAccess {
      * @throws IllegalArgumentException if mutantId is not present in the catalog.
      */
     public static String getMappedTestIdsJson(String mutantId);
+
+    /**
+     * Replaces the entry's astDiffSnippet (WP-19 plan-diff capture). Called by the
+     * Catalyst rule immediately after a rewrite is applied; the snippet is pure
+     * observation and never alters the plan, the coordinate space, or the
+     * applied-mutation record. In-process paths (JUnit 5 standalone, the PySpark
+     * driver) reach the final report through this catalog; externally-orchestrated
+     * mutant forks additionally persist the snippet as a diffs/<mutantId>.json
+     * sidecar (see DiffSnippetStore) for the aggregating coordinator.
+     *
+     * @throws IllegalArgumentException if mutantId is not present in the catalog.
+     */
+    public static void recordAstDiffSnippet(String mutantId, String astDiffSnippet);
 }
 
 package io.github.wpunit13.mutator.report;
@@ -528,6 +541,15 @@ exactly as specified.
 
 **Field-level contract notes:**
 
+- `astDiffSnippet` is populated by the engine at rewrite time (WP-19): the
+  Catalyst rule captures the matched node's before/after plan strings as a
+  single-line `"<before> => <after>"` fragment (each side truncated to 2000
+  chars, newlines flattened to `" | "`). In-process paths record it through
+  `MutationCatalogAccess.recordAstDiffSnippet`; externally-orchestrated mutant
+  forks persist it as a sidecar file `<outputDir>/diffs/<mutantId>.json`
+  (`{"mutantId": ..., "astDiffSnippet": ...}`, written by `DiffSnippetStore`)
+  which the coordinator merges before writing reports. The sidecar is NOT a
+  field in this schema; a missing sidecar legally leaves the field `""`.
 - `mutants[].result` is nullable **only** transiently during report
   generation if the process crashed mid-run without recording an outcome;
   `finalizeAndWriteReports()` MUST classify any such mutant as `ERRORED`

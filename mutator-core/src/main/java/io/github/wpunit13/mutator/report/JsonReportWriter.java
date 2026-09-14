@@ -36,6 +36,14 @@ public final class JsonReportWriter {
             Path outputDir,
             Collection<MutantMetadata> catalog,
             Map<String, MutantResult> results) throws IOException {
+        return write(outputDir, catalog, results, ReportWriter.Config.fromSystemProperties());
+    }
+
+    static Path write(
+            Path outputDir,
+            Collection<MutantMetadata> catalog,
+            Map<String, MutantResult> results,
+            ReportWriter.Config runConfig) throws IOException {
         // Contract-violation check: mutantId and coordinateHex must be exactly
         // 16 lowercase hex characters; never silently accepted.
         for (MutantMetadata meta : catalog) {
@@ -78,12 +86,15 @@ public final class JsonReportWriter {
         root.put("generatedAtEpochMillis", System.currentTimeMillis());
 
         ObjectNode config = root.putObject("config");
-        // Defaults pending config wiring in a later task; there is no config
-        // plumbing yet, so these literals are emitted as-is.
-        config.putArray("targetModules");
-        config.putArray("excludedMutators");
-        config.put("timeoutMultiplier", 2.0);
-        config.put("minMutationScore", 80.0);
+        // WP-19 config wiring: the config block's fields are part of the
+        // frozen §5.3 schema and are now populated from the run's actual
+        // configuration instead of placeholder literals.
+        ArrayNode targetModules = config.putArray("targetModules");
+        runConfig.getTargetModules().forEach(targetModules::add);
+        ArrayNode excludedMutators = config.putArray("excludedMutators");
+        runConfig.getExcludedMutators().forEach(excludedMutators::add);
+        config.put("timeoutMultiplier", runConfig.getTimeoutMultiplier());
+        config.put("minMutationScore", runConfig.getMinMutationScore());
 
         ObjectNode summary = root.putObject("summary");
         summary.put("totalMutants", catalog.size());

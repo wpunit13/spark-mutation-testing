@@ -4,10 +4,14 @@ import io.github.wpunit13.mutator.api.{NodeCoordinateFactory, OperatorType, Plan
 import io.github.wpunit13.mutator.catalog.MutationCatalogAccess
 import io.github.wpunit13.mutator.hash.DeterministicHasher
 import io.github.wpunit13.mutator.model.OperatorTypeDto
+import io.github.wpunit13.mutator.report.DiffSnippetStore
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.catalyst.trees.TreeNodeTag
+import org.slf4j.LoggerFactory
 
+import java.io.IOException
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
 /**
@@ -75,7 +79,7 @@ import java.util.concurrent.atomic.AtomicReference
 class CatalystMutationRule(shim: PlanMutatorShim, phase: CatalystMutationRule.Phase)
   extends Rule[LogicalPlan] {
 
-  import CatalystMutationRule.{AlreadyMutatedTag, consumePendingRewrite, peekPendingRewrite, recordPendingRewrite}
+  import CatalystMutationRule.{AlreadyMutatedTag, MutationPolicy, consumePendingRewrite, peekPendingRewrite, recordPendingRewrite}
 
   override def apply(plan: LogicalPlan): LogicalPlan = {
     // Read the registry state exactly once per apply call: it can change
@@ -98,29 +102,57 @@ class CatalystMutationRule(shim: PlanMutatorShim, phase: CatalystMutationRule.Ph
    * Branch A — Discovery mode (registry IDLE, PostHoc phase). Classifies every
    * node pre-order and reports candidates to the catalog builder. Returns the
    * plan completely unchanged; no new nodes are constructed here.
+   *
+   * WP-19 filtering, both directives read once per invocation (the system
+   * properties are static per fork JVM; in-process mode picks up live
+   * values):
+   *  - `spark.mutator.excludedMutators`: candidates whose operator type is
+   *    excluded are skipped (a user choice, not an error — but the skip is
+   *    logged so it is observable).
+   *  - `spark.mutator.targetModules`: when non-blank, candidates register
+   *    only while the current file-path hint starts with one of the prefixes.
+   *    If the hint is still the default "unknown" (no harness fed a hint),
+   *    NOTHING is registered and a single warning is emitted — silent
+   *    full-catalog behavior here would be the "every mutant survived"
+   *    failure mode in disguise.
    */
   private def discovery(plan: LogicalPlan): LogicalPlan = {
+    val policy = MutationPolicy.fromSystemProperties()
+    CatalystMutationRule.warnUnrecognizedExclusionsOnce(policy.unrecognizedExclusions)
+    val hint = CatalystMutationRule.currentFilePathHint
+    if (policy.targetModulePrefixes.nonEmpty && hint == CatalystMutationRule.DefaultFilePathHint) {
+      CatalystMutationRule.warnUnknownFilePathHintOnce(policy.targetModulePrefixes)
+      return plan
+    }
+    val targetAllowed = policy.targetModulePrefixes.isEmpty ||
+      policy.targetModulePrefixes.exists(hint.startsWith)
+    var excludedSkips = 0
+
     def walk(node: LogicalPlan, depth: Int, childOrdinal: Int): Unit = {
       shim.classify(node, depth, childOrdinal).foreach { case (operatorType, candidates) =>
-        val operatorTag = NodeCoordinateFactory.operatorTypeTag(operatorType)
         val dto = toDto(operatorType)
-        candidates.foreach { candidate =>
-          val coordinateHex = candidate.coordinate.toHex
-          val mutantId = DeterministicHasher.computeMutantId(
-            CatalystMutationRule.currentFilePathHint,
-            coordinateHex,
-            operatorTag,
-            candidate.mutationIndex)
-          // -1 for lineNumber: nothing computes a real source line yet and
-          // the model documents -1 as "unknown".
-          MutationCatalogAccess.sink().registerCandidate(
-            CatalystMutationRule.currentFilePathHint,
-            -1,
-            dto,
-            candidate.mutationIndex,
-            candidate.description,
-            coordinateHex,
-            mutantId)
+        if (policy.excludedOperators.contains(dto)) {
+          excludedSkips += 1
+        } else if (targetAllowed) {
+          val operatorTag = NodeCoordinateFactory.operatorTypeTag(operatorType)
+          candidates.foreach { candidate =>
+            val coordinateHex = candidate.coordinate.toHex
+            val mutantId = DeterministicHasher.computeMutantId(
+              CatalystMutationRule.currentFilePathHint,
+              coordinateHex,
+              operatorTag,
+              candidate.mutationIndex)
+            // -1 for lineNumber: nothing computes a real source line yet and
+            // the model documents -1 as "unknown".
+            MutationCatalogAccess.sink().registerCandidate(
+              CatalystMutationRule.currentFilePathHint,
+              -1,
+              dto,
+              candidate.mutationIndex,
+              candidate.description,
+              coordinateHex,
+              mutantId)
+          }
         }
       }
       node.children.zipWithIndex.foreach { case (child, ordinal) =>
@@ -129,6 +161,12 @@ class CatalystMutationRule(shim: PlanMutatorShim, phase: CatalystMutationRule.Ph
     }
 
     walk(plan, 0, -1)
+    if (excludedSkips > 0) {
+      CatalystMutationRule.log(
+        s"discovery skipped $excludedSkips candidate(s) on excluded operators " +
+          policy.excludedOperators.mkString("{", ", ", "}") +
+          " (spark.mutator.excludedMutators)")
+    }
     plan
   }
 
@@ -144,6 +182,15 @@ class CatalystMutationRule(shim: PlanMutatorShim, phase: CatalystMutationRule.Ph
       // The harness activated a mutant this JVM never catalogued; that is a
       // harness scheduling bug, diagnosed at the harness level. Never crash
       // the rule for it.
+      return plan
+    }
+    if (MutationPolicy.fromSystemProperties().excludedOperators.contains(meta.getOperatorType)) {
+      // Fail-safe: an excluded mutant must never apply, even if a stale
+      // catalog entry exists. Exclusion is a user choice, not an error — but
+      // the refusal is observable.
+      CatalystMutationRule.log(
+        s"active mutant $activeMutantId (${meta.getOperatorType}) is excluded by " +
+          "spark.mutator.excludedMutators; refusing to match")
       return plan
     }
 
@@ -218,6 +265,15 @@ class CatalystMutationRule(shim: PlanMutatorShim, phase: CatalystMutationRule.Ph
       // scheduling bug, diagnosed at the harness level. Never crash the rule.
       return plan
     }
+    if (MutationPolicy.fromSystemProperties().excludedOperators.contains(meta.getOperatorType)) {
+      // Fail-safe: an excluded mutant must never apply, even if a stale
+      // catalog entry or a pending rewrite exists. User choice, not an error
+      // — but the refusal is observable.
+      CatalystMutationRule.log(
+        s"active mutant $activeMutantId (${meta.getOperatorType}) is excluded by " +
+          "spark.mutator.excludedMutators; refusing to rewrite")
+      return plan
+    }
 
     var matched: Option[LogicalPlan] = None
 
@@ -260,18 +316,61 @@ class CatalystMutationRule(shim: PlanMutatorShim, phase: CatalystMutationRule.Ph
           case OperatorTypeDto.PROJECT   => shim.mutateProject(node, meta.getMutationIndex)
           case OperatorTypeDto.OTHER     => node
         }
+        // WP-19: pure capture of the before/after plan shapes around the
+        // rewrite. Observation only — it never alters the returned plan, the
+        // coordinate space, or the applied-mutation record.
+        val diffSnippet = astDiffSnippet(node, rewritten)
         // setTagValue returns Unit in Spark 3.5.x (it returned this.type
         // in older Spark lines), so the tag is set in place on `rewritten`.
         rewritten.setTagValue(AlreadyMutatedTag, true)
         // Honesty tracking: record the applied fact only after a rewrite
         // was actually applied — never on a no-match.
         AppliedMutantTracker.record(activeMutantId)
+        persistDiffSnippet(activeMutantId, diffSnippet)
         // One-shot: consume the pending entry so later batches/iterations
         // cannot rewrite a second node for the same mutant.
         consumePendingRewrite()
         // Replace only the matched node; reference-equality guard ensures
         // exactly one node is spliced and every other node is preserved.
         plan.transformDown { case n if n eq node => rewritten }
+    }
+  }
+
+  /**
+   * Builds the schema's astDiffSnippet: "<before-fragment> => <after-fragment>",
+   * each fragment a single-line plan string truncated to
+   * [[CatalystMutationRule.MaxPlanFragmentChars]] (newlines flattened to
+   * " | ").
+   */
+  private def astDiffSnippet(before: LogicalPlan, after: LogicalPlan): String =
+    s"${CatalystMutationRule.planFragment(before)} => ${CatalystMutationRule.planFragment(after)}"
+
+  /**
+   * Persistence of the captured snippet. In-process paths (JUnit 5
+   * standalone, the PySpark driver) reach the final report through the live
+   * catalog singleton, so recording there is sufficient. Externally
+   * orchestrated mutant forks have an output directory and the `mutant`
+   * phase set: their in-memory copy dies with the JVM, so the snippet is
+   * additionally persisted as a `diffs/<mutantId>.json` sidecar that the
+   * coordinator merges before writing reports. A failed sidecar write is a
+   * contract violation and fails loudly rather than silently dropping data.
+   */
+  private def persistDiffSnippet(mutantId: String, snippet: String): Unit = {
+    MutationCatalogAccess.recordAstDiffSnippet(mutantId, snippet)
+    if (MutantBootstrap.phaseOrNull() == MutantBootstrap.PHASE_MUTANT) {
+      MutantBootstrap.outputDirectoryOrNull() match {
+        case null | "" =>
+          // No output directory configured: nothing to persist. The harness
+          // contract would already have failed the applied-marker step.
+        case dir =>
+          try {
+            DiffSnippetStore.write(java.nio.file.Path.of(dir), mutantId, snippet)
+          } catch {
+            case e: IOException =>
+              throw new IllegalStateException(
+                s"Could not write diff snippet sidecar for mutant '$mutantId' under $dir.", e)
+          }
+      }
     }
   }
 
@@ -293,6 +392,92 @@ object CatalystMutationRule {
   case object PostHoc extends Phase
   case object Optimizer extends Phase
 
+  /**
+   * The file-path hint every harness starts with. `spark.mutator.targetModules`
+   * treats it as "no hint fed" and refuses to register anything (fail-safe).
+   */
+  val DefaultFilePathHint: String = "unknown"
+
+  /** Max chars per plan fragment in astDiffSnippet (single shared constant). */
+  val MaxPlanFragmentChars: Int = 2000
+
+  /**
+   * The WP-19 fork directives, parsed once per rule invocation (system
+   * properties are static per fork JVM, so this is behaviorally identical to
+   * reading once per instance there; in-process mode picks up live values).
+   * Exclusion keys are OperatorType names, case-insensitive; unrecognized
+   * tokens (e.g. legacy mutator display names understood only by the
+   * embedding harness) are reported back so the caller can warn once and
+   * ignore.
+   */
+  private[mutator] final case class MutationPolicy(
+      excludedOperators: Set[OperatorTypeDto],
+      targetModulePrefixes: Vector[String],
+      unrecognizedExclusions: Vector[String])
+
+  private[mutator] object MutationPolicy {
+    val ExcludedMutatorsProp: String = "spark.mutator.excludedMutators"
+    val TargetModulesProp: String = "spark.mutator.targetModules"
+
+    private val operatorNames: Set[String] =
+      Set("JOIN", "FILTER", "AGGREGATE", "WINDOW", "PROJECT", "OTHER")
+
+    def fromSystemProperties(): MutationPolicy = {
+      val excludedRaw = splitCsv(System.getProperty(ExcludedMutatorsProp))
+      val excluded = excludedRaw
+        .map(_.toUpperCase)
+        .filter(operatorNames.contains)
+        .map(OperatorTypeDto.valueOf)
+        .toSet
+      val unrecognized = excludedRaw.filterNot(token => operatorNames.contains(token.toUpperCase))
+      MutationPolicy(excluded, splitCsv(System.getProperty(TargetModulesProp)), unrecognized)
+    }
+
+    private def splitCsv(value: String): Vector[String] =
+      if (value == null || value.isBlank) Vector.empty
+      else value.split(',').map(_.trim).filter(_.nonEmpty).toVector
+  }
+
+  /**
+   * The rule's observable-skip/warn channel. slf4j (provided scope) binds to
+   * the driver's existing log4j2 runtime — the same logger every Spark
+   * extension uses. Everything logged here is WARN-level so it survives the
+   * default Spark log level; the `spark-mutator` logger name keeps the
+   * messages greppable and separately tunable.
+   */
+  private val logger = LoggerFactory.getLogger("spark-mutator")
+
+  private[mutator] def log(message: String): Unit = logger.warn(message)
+
+  private val warnedUnknownFilePathHint = new AtomicBoolean(false)
+
+  /** Single warning when targetModules is set but no hint was ever fed. */
+  private[mutator] def warnUnknownFilePathHintOnce(prefixes: Vector[String]): Unit =
+    if (warnedUnknownFilePathHint.compareAndSet(false, true)) {
+      log(
+        "spark.mutator.targetModules is set to " + prefixes.mkString("[", ", ", "]") +
+          " but no harness has fed a file-path hint (hint is the default \"" +
+          DefaultFilePathHint + "\"); registering NO candidates. Feed real hints via " +
+          "CatalystMutationRule.setCurrentFilePathHint or unset the property.")
+    }
+
+  private val warnedUnrecognizedExclusions = new AtomicBoolean(false)
+
+  /**
+    * Single warning for exclusion tokens that are not OperatorType names —
+    * e.g. legacy mutator display names, which only the embedding harness can
+    * resolve (the Python layer enforces those itself). Ignoring them here is
+    * deliberate; staying silent about it would not be.
+    */
+  private[mutator] def warnUnrecognizedExclusionsOnce(tokens: Vector[String]): Unit =
+    if (warnedUnrecognizedExclusions.compareAndSet(false, true) && tokens.nonEmpty) {
+      log(
+        "ignoring non-OperatorType exclusion token(s) in " +
+          MutationPolicy.ExcludedMutatorsProp + ": " + tokens.mkString("[", ", ", "]") +
+          " (canonical keys are JOIN, FILTER, AGGREGATE, WINDOW, PROJECT, OTHER; " +
+          "legacy mutator names are enforced by the embedding harness)")
+    }
+
   /** Tags a node that has already been rewritten for the active mutant. */
   private[mutator] val AlreadyMutatedTag = TreeNodeTag[Boolean]("spark-mutator.alreadyMutated")
 
@@ -312,7 +497,14 @@ object CatalystMutationRule {
   /** One-shot consumption after a successful rewrite. */
   private def consumePendingRewrite(): Unit = pendingRewrite.set(null)
 
-  private val filePathHint = new AtomicReference[String]("unknown")
+  /** Single-line plan fragment for astDiffSnippet (shared constant bound). */
+  private[mutator] def planFragment(plan: LogicalPlan): String = {
+    val singleLine = plan.toString.replace("\r\n", " | ").replace("\n", " | ")
+    if (singleLine.length > MaxPlanFragmentChars) singleLine.substring(0, MaxPlanFragmentChars)
+    else singleLine
+  }
+
+  private val filePathHint = new AtomicReference[String](DefaultFilePathHint)
 
   /** Wired in by the test harness; defaults to "unknown" until then. */
   def setCurrentFilePathHint(filePath: String): Unit = filePathHint.set(filePath)

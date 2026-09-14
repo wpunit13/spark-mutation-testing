@@ -28,8 +28,13 @@ def _make_jars_dir(tmp_path, *filenames):
 # ---------------------------------------------------------------------------
 
 
-def test_version_matrix_contains_exactly_the_built_shim():
-    assert VERSION_MATRIX == {"3.5_2.13": "interceptor-spark-3.5_2.13.jar"}
+def test_version_matrix_covers_both_active_combos():
+    # WP-19: the 3.5/2.12 cell joins 3.5/2.13 — the sibling interceptor-bundle
+    # module builds both jars and bundle_jars.py copies both into the wheel.
+    assert VERSION_MATRIX == {
+        "3.5_2.13": "interceptor-spark-3.5_2.13.jar",
+        "3.5_2.12": "interceptor-spark-3.5_2.12.jar",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -107,6 +112,26 @@ def test_resolve_shim_jar_filename_happy_path(tmp_path):
     )
 
 
+@pytest.mark.parametrize(
+    ("scala_binary", "expected_jar"),
+    [
+        ("2.13", "interceptor-spark-3.5_2.13.jar"),
+        ("2.12", "interceptor-spark-3.5_2.12.jar"),
+    ],
+    ids=["scala-2.13", "scala-2.12"],
+)
+def test_resolve_shim_jar_filename_covers_both_matrix_entries(
+    tmp_path, scala_binary, expected_jar
+):
+    # WP-19: shim resolution is parametrized over every VERSION_MATRIX entry —
+    # a 2.12-built pyspark distribution must resolve its own shim, not fail.
+    jars_dir = _make_jars_dir(tmp_path, f"spark-core_{scala_binary}-3.5.1.jar")
+    assert (
+        resolve_shim_jar_filename(pyspark_version="3.5.1", jars_dir=jars_dir)
+        == expected_jar
+    )
+
+
 def test_resolve_shim_jar_filename_unsupported_spark_fast_fails(tmp_path):
     jars_dir = _make_jars_dir(tmp_path, "spark-core_2.13-4.0.0.jar")
     with pytest.raises(UnsupportedSparkVersionError) as excinfo:
@@ -114,10 +139,16 @@ def test_resolve_shim_jar_filename_unsupported_spark_fast_fails(tmp_path):
     message = str(excinfo.value)
     assert "4.0_2.13" in message
     assert "3.5_2.13" in message
+    assert "3.5_2.12" in message
 
 
 def test_resolve_shim_jar_filename_right_spark_wrong_scala_raises(tmp_path):
-    jars_dir = _make_jars_dir(tmp_path, "spark-core_2.12-3.5.1.jar")
+    # Spark 3.4 has no shim for either Scala binary; the error must name the
+    # offending combination and list the supported keys.
+    jars_dir = _make_jars_dir(tmp_path, "spark-core_2.13-3.4.2.jar")
     with pytest.raises(UnsupportedSparkVersionError) as excinfo:
-        resolve_shim_jar_filename(pyspark_version="3.5.1", jars_dir=jars_dir)
-    assert "3.5_2.12" in str(excinfo.value)
+        resolve_shim_jar_filename(pyspark_version="3.4.2", jars_dir=jars_dir)
+    message = str(excinfo.value)
+    assert "3.4_2.13" in message
+    assert "3.5_2.13" in message
+    assert "3.5_2.12" in message

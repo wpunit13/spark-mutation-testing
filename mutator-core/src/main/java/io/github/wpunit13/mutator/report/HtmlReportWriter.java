@@ -76,6 +76,11 @@ public final class HtmlReportWriter {
                 .append("tr.survived td.status { color: #9a6700; font-weight: 700; }\n")
                 .append("code { font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;"
                         + " font-size: 0.8rem; }\n")
+                .append("details.diff-cell { display: inline-block; }\n")
+                .append("details.diff-cell summary { cursor: pointer; color: #0969da; }\n")
+                .append("details.diff-cell pre { max-width: 60ch; white-space: pre-wrap; word-break: break-all;"
+                        + " background: #f6f8fa; border: 1px solid #d0d7de; border-radius: 4px;"
+                        + " padding: 0.4rem; margin: 0.3rem 0 0 0; font-size: 0.75rem; }\n")
                 .append("</style>\n</head>\n<body>\n")
                 .append("<h1>spark-mutator mutation report</h1>\n");
 
@@ -90,7 +95,7 @@ public final class HtmlReportWriter {
                 .append("</div>\n");
 
         html.append("<table>\n<tr><th>Mutant ID</th><th>Operator</th><th>Description</th>")
-                .append("<th>Status</th><th>Location</th><th>Mapped tests</th></tr>\n");
+                .append("<th>Status</th><th>Location</th><th>Mapped tests</th><th>Plan diff</th></tr>\n");
         for (MutantMetadata meta : sorted) {
             MutantResult result = results.get(meta.getMutantId());
             MutantStatus status = result == null ? MutantStatus.ERRORED : result.getStatus();
@@ -103,6 +108,7 @@ public final class HtmlReportWriter {
                     .append("<td class=\"status\">").append(escape(status.name())).append(TABLE_CELL_CLOSE)
                     .append("<td><code>").append(escape(location)).append("</code></td>")
                     .append("<td>").append(meta.getMappedTestIds().size()).append(TABLE_CELL_CLOSE)
+                    .append(diffCell(meta.getAstDiffSnippet()))
                     .append("</tr>\n");
         }
         html.append("</table>\n</body>\n</html>\n");
@@ -111,6 +117,20 @@ public final class HtmlReportWriter {
         Files.createDirectories(outputDir);
         Files.writeString(target, html.toString(), StandardCharsets.UTF_8);
         return target;
+    }
+
+    /**
+     * Expandable plan-diff cell (WP-19): the captured before/after plan
+     * fragment inside a {@code <details>} element, all plan text escaped.
+     * An empty snippet renders nothing for that row — the field is optional.
+     */
+    private static String diffCell(String astDiffSnippet) {
+        if (astDiffSnippet == null || astDiffSnippet.isEmpty()) {
+            return "<td>" + TABLE_CELL_CLOSE;
+        }
+        return "<td><details class=\"diff-cell\"><summary>diff</summary><pre>"
+                + escape(astDiffSnippet)
+                + "</pre></details>" + TABLE_CELL_CLOSE;
     }
 
     private static String escape(String value) {

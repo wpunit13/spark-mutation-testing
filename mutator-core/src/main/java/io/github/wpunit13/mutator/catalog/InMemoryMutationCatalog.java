@@ -88,6 +88,35 @@ final class InMemoryMutationCatalog implements MutationCatalogSink {
     }
 
     /**
+     * Replaces the entry's {@code astDiffSnippet} — the in-process half of
+     * WP-19 plan-diff capture (the fork-side half is the {@code diffs/}
+     * sidecar written by {@code DiffSnippetStore}). Mirrors the
+     * {@code mappedTestIds} merge pattern: {@code MutantMetadata} is
+     * immutable, so the update produces a replacement object under a single
+     * atomic map operation.
+     *
+     * @throws IllegalArgumentException if mutantId is not present in the
+     *         catalog (fail loudly — same contract as
+     *         {@code ReportSink.recordOutcome}).
+     */
+    void recordAstDiffSnippet(String mutantId, String astDiffSnippet) {
+        if (catalog.get(mutantId) == null) {
+            throw new IllegalArgumentException(
+                    "Unknown mutantId '" + mutantId + "': not present in the catalog.");
+        }
+        catalog.computeIfPresent(mutantId, (key, existing) -> new MutantMetadata(
+                existing.getMutantId(),
+                existing.getFilePath(),
+                existing.getLineNumber(),
+                existing.getOperatorType(),
+                existing.getMutationIndex(),
+                existing.getDescription(),
+                existing.getCoordinateHex(),
+                astDiffSnippet,
+                existing.getMappedTestIds()));
+    }
+
+    /**
      * Restores externally-supplied entries — the fork-side half of the
      * cross-process catalog handoff. A mutant fork never runs Discovery (that
      * happened in the baseline fork, a different JVM), so the bridge loads

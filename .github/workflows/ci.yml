@@ -13,9 +13,21 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          # Full history so the version-hygiene guard can compute the merge
+          # base against the PR's target branch.
+          fetch-depth: 0
 
       - name: Check no Spark imports in mutator-core
         run: bash scripts/check_no_spark_imports.sh
+
+      # WP-19 version-hygiene merge guard (docs/RELEASING.md Rule 1). PR-only:
+      # direct-to-main release/bump commits are not PRs and are unaffected.
+      - name: Check version hygiene
+        if: github.event_name == 'pull_request'
+        run: bash scripts/check_version_hygiene.sh
+        env:
+          BASE_REF: origin/${{ github.base_ref }}
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4

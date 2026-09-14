@@ -6,6 +6,7 @@ import io.github.wpunit13.mutator.model.MutantMetadata;
 import io.github.wpunit13.mutator.model.MutantResult;
 import io.github.wpunit13.mutator.model.MutantStatus;
 import io.github.wpunit13.mutator.report.AppliedMarkerStore;
+import io.github.wpunit13.mutator.report.DiffSnippetStore;
 import io.github.wpunit13.mutator.report.OutcomeFileStore;
 import io.github.wpunit13.mutator.report.ReportWriter;
 import org.apache.maven.plugin.MojoExecutionException;
@@ -15,6 +16,7 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -36,29 +38,49 @@ import java.util.Objects;
  *
  * <p>State crosses the process boundary exclusively through files under the
  * output directory: {@code catalog.json} (discovery: fork &rarr; orchestrator),
- * {@code applied/<id>.json} (applied-mutation markers: fork &rarr; orchestrator)
+ * {@code applied/<id>.json} (applied-mutation markers: fork &rarr; orchestrator),
+ * {@code diffs/<id>.json} (plan-diff snippets: fork &rarr; orchestrator, WP-19)
  * and {@code outcomes/<id>.json} (results: orchestrator writes, then merges).
  * The active-mutant directive crosses in the other direction via system
  * properties set on each fork launch.
  */
 public class MutationLoopCoordinator {
 
+    /** Fork-directive keys for the WP-19 config filters (developer-guide §3.1). */
+    public static final String PROP_TARGET_MODULES = "spark.mutator.targetModules";
+    public static final String PROP_EXCLUDED_MUTATORS = "spark.mutator.excludedMutators";
+
     private final SurefireExecutor surefireExecutor;
     private final double timeoutMultiplier;
     private final Path outputDirectory;
     private final double minMutationScore;
+    private final List<String> targetModules;
+    private final List<String> excludedMutators;
 
     public MutationLoopCoordinator(
             SurefireExecutor surefireExecutor,
             double timeoutMultiplier,
             File outputDirectory,
             double minMutationScore) {
+        this(surefireExecutor, timeoutMultiplier, outputDirectory, minMutationScore,
+                List.of(), List.of());
+    }
+
+    public MutationLoopCoordinator(
+            SurefireExecutor surefireExecutor,
+            double timeoutMultiplier,
+            File outputDirectory,
+            double minMutationScore,
+            List<String> targetModules,
+            List<String> excludedMutators) {
         this.surefireExecutor = Objects.requireNonNull(surefireExecutor, "surefireExecutor must not be null");
         this.timeoutMultiplier = timeoutMultiplier > 0.0 ? timeoutMultiplier : 2.0;
         this.outputDirectory = outputDirectory != null
                 ? outputDirectory.toPath()
                 : Path.of("target", "spark-mutator-reports");
         this.minMutationScore = minMutationScore;
+        this.targetModules = targetModules == null ? List.of() : List.copyOf(targetModules);
+        this.excludedMutators = excludedMutators == null ? List.of() : List.copyOf(excludedMutators);
     }
 
     public MutationLoopCoordinator(SurefireExecutor surefireExecutor) {
@@ -89,10 +111,11 @@ public class MutationLoopCoordinator {
                 : 1000L;
 
         // 2. Read the catalog back across the process boundary.
-        List<MutantMetadata> catalog = readCatalog();
+        List<MutantMetadata> catalog = new ArrayList<>(readCatalog());
 
         if (catalog.isEmpty()) {
-            String reportPath = ReportWriter.writeReports(outputDirectory, catalog, Map.of());
+            String reportPath = ReportWriter.writeReports(
+                    outputDirectory, catalog, Map.of(), reportConfig());
             return new MutationLoopResult(0, 0, 0, 0, 0, 0.0, reportPath);
         }
 
@@ -116,6 +139,7 @@ public class MutationLoopCoordinator {
 
             MutantResult outcome = classify(mutantId, mutantResult, timeoutMillis);
             writeOutcome(outcome);
+            mergeDiffSnippet(catalog, mutantId);
 
             switch (outcome.getStatus()) {
                 case KILLED -> killed++;
@@ -129,7 +153,8 @@ public class MutationLoopCoordinator {
         // 4. Merge all outcome files (fan-in) and write the final reports.
         Map<String, MutantResult> merged = readOutcomes();
         double score = mutationScore(killed, timedOut, survived);
-        String reportPath = ReportWriter.writeReports(outputDirectory, catalog, merged);
+        String reportPath = ReportWriter.writeReports(
+                outputDirectory, catalog, merged, reportConfig());
 
         return new MutationLoopResult(
                 catalog.size(),
@@ -177,6 +202,7 @@ public class MutationLoopCoordinator {
         Map<String, String> props = new HashMap<>();
         props.put(MutantBootstrap.PROP_PHASE, MutantBootstrap.PHASE_BASELINE);
         props.put(MutantBootstrap.PROP_OUTPUT_DIRECTORY, outputDirectory.toAbsolutePath().toString());
+        putFilterDirectives(props);
         return props;
     }
 
@@ -185,7 +211,67 @@ public class MutationLoopCoordinator {
         props.put(MutantBootstrap.PROP_PHASE, MutantBootstrap.PHASE_MUTANT);
         props.put(MutantBootstrap.PROP_ACTIVE_MUTANT, mutantId);
         props.put(MutantBootstrap.PROP_OUTPUT_DIRECTORY, outputDirectory.toAbsolutePath().toString());
+        putFilterDirectives(props);
         return props;
+    }
+
+    /**
+     * WP-19 fork directives (developer-guide §3.1): both filter properties
+     * ride the same channel as {@code spark.mutator.phase} and reach every
+     * fork. Blank/unset means "no filtering".
+     */
+    private void putFilterDirectives(Map<String, String> props) {
+        if (!targetModules.isEmpty()) {
+            props.put(PROP_TARGET_MODULES, String.join(",", targetModules));
+        }
+        if (!excludedMutators.isEmpty()) {
+            props.put(PROP_EXCLUDED_MUTATORS, String.join(",", excludedMutators));
+        }
+    }
+
+    /** The config echo this run was orchestrated with (report §5.3 config block). */
+    private ReportWriter.Config reportConfig() {
+        return new ReportWriter.Config(
+                targetModules, excludedMutators, timeoutMultiplier, minMutationScore);
+    }
+
+    /**
+     * Merges the mutant fork's plan-diff sidecar (WP-19) into the in-memory
+     * catalog copy before the reports are written. A missing sidecar legally
+     * leaves the snippet empty; a sidecar naming an unknown mutant is a
+     * contract violation and fails loudly.
+     */
+    private void mergeDiffSnippet(List<MutantMetadata> catalog, String mutantId)
+            throws MojoExecutionException {
+        String snippet;
+        try {
+            snippet = DiffSnippetStore.readSnippetOrNull(outputDirectory, mutantId);
+        } catch (IOException e) {
+            throw new MojoExecutionException(
+                    "Failed to read diff snippet sidecar for " + mutantId + ": " + e.getMessage(), e);
+        }
+        if (snippet == null || snippet.isEmpty()) {
+            return;
+        }
+        for (int i = 0; i < catalog.size(); i++) {
+            MutantMetadata meta = catalog.get(i);
+            if (meta.getMutantId().equals(mutantId)) {
+                catalog.set(i, new MutantMetadata(
+                        meta.getMutantId(),
+                        meta.getFilePath(),
+                        meta.getLineNumber(),
+                        meta.getOperatorType(),
+                        meta.getMutationIndex(),
+                        meta.getDescription(),
+                        meta.getCoordinateHex(),
+                        snippet,
+                        meta.getMappedTestIds()));
+                return;
+            }
+        }
+        throw new MojoExecutionException(
+                "Contract violation: diff snippet sidecar references unknown mutantId '"
+                        + mutantId + "'.");
     }
 
     /**
@@ -247,6 +333,14 @@ public class MutationLoopCoordinator {
 
     public double getMinMutationScore() {
         return minMutationScore;
+    }
+
+    public List<String> getTargetModules() {
+        return targetModules;
+    }
+
+    public List<String> getExcludedMutators() {
+        return excludedMutators;
     }
 
     /**

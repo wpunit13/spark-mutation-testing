@@ -41,5 +41,9 @@
     <module>interceptor-spark-3.5_2.13</module>
     <module>interceptor-runtime</module>
     <module>interceptor-bundle</module>
+    <!-- WP-19 multi-shim wheel: one bundle per Scala binary cell, mirroring
+         the 2.13 bundle's shade configuration. Listed after interceptor-bundle
+         per the description above (bundles package every other module). -->
+    <module>interceptor-bundle-2.12</module>
   </modules>
 </project>

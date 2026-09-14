@@ -44,6 +44,24 @@ public final class MutationCatalogAccess {
         return InMemoryMutationCatalog.getInstance().findByIdOrNull(mutantId);
     }
 
+    /**
+     * Replaces the entry's {@code astDiffSnippet} (WP-19 plan-diff capture).
+     * Called by the Catalyst rule immediately after a rewrite is applied; the
+     * snippet is pure observation and never alters the plan, the coordinate
+     * space, or the applied-mutation record. In-process paths (JUnit 5
+     * standalone, the PySpark driver) reach the final report through this
+     * catalog; externally-orchestrated mutant forks additionally persist the
+     * snippet as a {@code diffs/<mutantId>.json} sidecar (see
+     * {@code DiffSnippetStore}) for the aggregating coordinator.
+     *
+     * @throws IllegalArgumentException if mutantId is not present in the
+     *         catalog (fail loudly — same contract as
+     *         {@code ReportSink.recordOutcome}).
+     */
+    public static void recordAstDiffSnippet(String mutantId, String astDiffSnippet) {
+        InMemoryMutationCatalog.getInstance().recordAstDiffSnippet(mutantId, astDiffSnippet);
+    }
+
     /** Test-only reset; delegates to the backing singleton. */
     public static void clearForTesting() {
         InMemoryMutationCatalog.getInstance().clearForTesting();
