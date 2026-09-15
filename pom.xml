@@ -107,6 +107,11 @@
         <artifactId>interceptor-spark-3.5_2.12</artifactId>
         <version>${project.version}</version>
       </dependency>
+      <dependency>
+        <groupId>io.github.wpunit13</groupId>
+        <artifactId>interceptor-spark-4.2_2.13</artifactId>
+        <version>${project.version}</version>
+      </dependency>
 
       <!--
         Compile-time-only logging API for the interceptor (always provided —

@@ -4,7 +4,7 @@ import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 
 trait PlanMutatorShim {
 
-  /** Identifies the exact Spark + Scala binary version cell this shim targets,
+  /** Identifies the exact Spark/Scala combination this shim targets,
     * e.g. SparkShimVersion("3.5", "2.13"). Used for diagnostic logging only. */
   def supportedVersion: SparkShimVersion
 

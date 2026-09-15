@@ -39,16 +39,24 @@ is left open, it is explicitly marked `[OPEN]`; everything else is fixed.
         │   ┌──────────────┼──────────────┬──────────────────┬────────────────────┐     │
         │   │              │              │                  │                    │     │
         │ interceptor-  interceptor-  interceptor-       interceptor-        interceptor- │
-        │ spark-3.4_2.12 spark-3.5_2.12 spark-3.5_2.13    spark-4.0_2.13       dispatch    │
-        │ (PlanMutatorShim  impls, one per Spark/Scala binary combination)  (ServiceLoader │
-        │                                                                     runtime pick) │
-        └──────────────────────────────────────────────────────────────────────────────┘
+        │ spark-3.5_2.12 spark-3.5_2.13 spark-4.2_2.13    dispatch            (planned:     │
+        │ (PlanMutatorShim  impls, one per Spark/Scala binary combination)  (ServiceLoader │ 4.1_2.13,   │
+        │                                                                     runtime pick) │ 4.0_2.13)   │
+        └──────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-> **Currently implemented shims:** `interceptor-spark-3.5_2.12` and
-> `interceptor-spark-3.5_2.13` only. The `3.4_2.12` and `4.0_2.13` cells in the
-> graph are *planned* targets (N-2 policy, spec §7.2) — they do **not** exist
-> yet; adding them follows [`VERSION_ADDITION_SOP.md`](VERSION_ADDITION_SOP.md).
+> **Currently implemented shims:** `interceptor-spark-3.5_2.12`,
+> `interceptor-spark-3.5_2.13`, and `interceptor-spark-4.2_2.13` (WP-20).
+> A shim is keyed to a **Spark/Scala combination** — one Spark minor version ×
+> Scala binary version pair, keyed `<sparkMinor>_<scalaBinary>` (the frozen
+> `VERSION_ADDITION_SOP.md` calls it a "cell"). Under the lifecycle policy
+> (spec §7.2, revised WP-20) the supported set is
+> the **latest LTS line plus the N-2 window**: Spark 3.5 is the LTS line
+> (EOL 2027-11) and 4.2 is the current GA minor; Spark 3.4 (EOL since October
+> 2024) is dropped and will never be added. The 4.1_2.13 and 4.0_2.13
+> combinations sit inside the N-2 window and remain *planned* backlog — adding
+> them follows [`VERSION_ADDITION_SOP.md`](VERSION_ADDITION_SOP.md) exactly as
+> WP-20 added 4.2_2.13.
 
 **Dependency direction is strictly one-way and acyclic:**
 `mutator-core` → nothing Spark-specific. `interceptor-api` → minimal Catalyst
@@ -402,10 +410,10 @@ catalyst-interceptor/
 │   └── src/main/scala/.../SparkShimVersion.scala
 ├── interceptor-dispatch/                # Scala, ServiceLoader-based runtime dispatcher
 │   └── src/main/scala/.../ShimDispatcher.scala
-├── interceptor-spark-3.4_2.12/
 ├── interceptor-spark-3.5_2.12/
 ├── interceptor-spark-3.5_2.13/
-└── interceptor-spark-4.0_2.13/
+├── interceptor-spark-4.2_2.13/
+└── (planned: interceptor-spark-4.1_2.13/, interceptor-spark-4.0_2.13/)
     └── (each) src/main/scala/.../ShimImpl.scala + src/main/resources/META-INF/services/...PlanMutatorShim
 ```
 
@@ -428,7 +436,7 @@ simultaneously so the Python wheel can bundle all of them. Each such module:
   (not inherited flexibly from the root `pom.xml`), e.g.
   `interceptor-spark-3.5_2.13/pom.xml` fixes `<spark.version>3.5.x</spark.version>`
   and `<scala.version>2.13.x</scala.version>` to the specific patch versions
-  the CI matrix pins for that cell.
+  the CI matrix pins for that combination.
 - Depends on `spark-catalyst_<scala>` and `spark-sql_<scala>` at `provided`
   scope (never shaded — these come from the consumer's classpath at runtime).
 - Depends on `interceptor-api` at `compile` scope.
@@ -521,7 +529,7 @@ Exact, ordered checklist (expands spec §7.4 to file-level granularity):
 4. Add the module to the root `pom.xml` `<modules>` list.
 5. Add the built jar's filename to `python/pytest_spark_mutator/jars/`
    packaging step and its key to `VERSION_MATRIX` in `plugin.py`.
-6. Add the new `<major.minor>_<scala>` cell to the CI matrix
+6. Add the new `<major.minor>_<scala>` combination to the CI matrix
    (build + shim unit tests + at least one `examples/` pipeline run per
    language).
 7. Update the compatibility table in the top-level `README.md`.
@@ -534,7 +542,7 @@ Exact, ordered checklist (expands spec §7.4 to file-level granularity):
 2. Remove its `<module>` entry from the root `pom.xml`.
 3. Remove its entry (and jar file) from `python/pytest_spark_mutator/jars/`
    and `VERSION_MATRIX`.
-4. Remove its CI matrix cell.
+4. Remove its CI matrix entry.
 5. Update the `README.md` compatibility table, moving the version to an
    "unsupported" list.
 

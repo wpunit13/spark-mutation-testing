@@ -168,8 +168,8 @@ import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 
 trait PlanMutatorShim {
 
-  /** Identifies the exact Spark + Scala binary version cell this shim targets,
-    * e.g. SparkShimVersion("3.5", "2.13"). Used for diagnostic logging only —
+  /** Identifies the exact Spark/Scala combination this shim targets,
+    * e.g. SparkShimVersion("3.5", "2.13"). Used for diagnostic logging only. */
     * runtime selection itself happens one layer up, in interceptor-dispatch. */
   def supportedVersion: SparkShimVersion
 
@@ -221,7 +221,7 @@ trait PlanMutatorShim {
   def canonicalExprSig(node: LogicalPlan, operatorType: OperatorType): String
 }
 
-/** Immutable value identifying a shim's target Spark/Scala binary cell. */
+/** Immutable value identifying a shim's target Spark/Scala combination. */
 final case class SparkShimVersion(sparkMinor: String, scalaBinary: String)
 ```
 

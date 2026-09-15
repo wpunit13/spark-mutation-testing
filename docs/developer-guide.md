@@ -236,7 +236,7 @@ modes.
 
 ## 6. Adding a Spark/Scala shim
 
-Adding a new `(major.minor × scalaBinary)` cell is a separate, frozen runbook:
+Adding a new `(major.minor × scalaBinary)` combination is a separate, frozen runbook:
 [`VERSION_ADDITION_SOP.md`](VERSION_ADDITION_SOP.md). In short: create a new
 `interceptor-spark-<ver>_<scala>` module, prove compatibility *by compiling*,
 add the golden cross-version test, register the module, and add the bundle +

@@ -83,11 +83,32 @@ class SparkVersionDetectorTest {
         assertEquals("io.github.wpunit13:interceptor-spark-3.5_2.12:1.0.0-SNAPSHOT", coordinate.getCoordinate());
     }
 
+    @Test
+    void testSpark42Scala213SupportedAndMapped() throws MojoExecutionException {
+        SparkVersionDetector detector = new SparkVersionDetector();
+        Set<Artifact> artifacts = new HashSet<>();
+        artifacts.add(createArtifact("org.apache.spark", "spark-sql_2.13", "4.2.0"));
+        artifacts.add(createArtifact("org.apache.spark", "spark-catalyst_2.13", "4.2.0"));
+
+        SparkVersionDetector.InterceptorCoordinate coordinate = detector.detect(artifacts);
+
+        assertNotNull(coordinate);
+        assertEquals("io.github.wpunit13", coordinate.getGroupId());
+        assertEquals("interceptor-spark-4.2_2.13", coordinate.getArtifactId());
+        assertEquals("1.0.0-SNAPSHOT", coordinate.getVersion());
+        assertEquals("4.2.0", coordinate.getSparkVersion());
+        assertEquals("4.2", coordinate.getSparkMinor());
+        assertEquals("2.13", coordinate.getScalaVersion());
+        assertEquals("4.2_2.13", coordinate.getKey());
+        assertEquals("io.github.wpunit13:interceptor-spark-4.2_2.13:1.0.0-SNAPSHOT", coordinate.getCoordinate());
+    }
+
     @ParameterizedTest
     @CsvSource({
             "spark-sql_2.12, 2.4.8, 2.4_2.12, true",
             "spark-sql_2.12, 3.4.1, 3.4_2.12, false",
-            "spark-sql_2.13, 4.0.0, 4.0_2.13, false"
+            "spark-sql_2.13, 4.0.0, 4.0_2.13, false",
+            "spark-sql_2.13, 4.1.3, 4.1_2.13, false"
     })
     void testUnsupportedSparkVersionThrowsMojoExecutionException(
             String artifactId, String version, String combination, boolean assertSupportedVersionsListing) {
@@ -106,7 +127,8 @@ class SparkVersionDetectorTest {
         if (assertSupportedVersionsListing) {
             assertTrue(ex.getMessage().contains("Supported versions:"),
                     "Message should state supported versions: " + ex.getMessage());
-            assertTrue(ex.getMessage().contains("3.5_2.12") && ex.getMessage().contains("3.5_2.13"),
+            assertTrue(ex.getMessage().contains("3.5_2.12") && ex.getMessage().contains("3.5_2.13")
+                            && ex.getMessage().contains("4.2_2.13"),
                     "Message should list all supported versions: " + ex.getMessage());
         }
     }

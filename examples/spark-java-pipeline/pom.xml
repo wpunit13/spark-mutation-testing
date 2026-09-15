@@ -28,6 +28,23 @@
   <artifactId>spark-java-pipeline</artifactId>
   <packaging>jar</packaging>
 
+  <properties>
+    <!--
+      The interceptor bundle mounted for plain `mvn test`. Defaults to the
+      latest-LTS line (3.5); retarget the whole example to another supported
+      Spark line by overriding the version properties, e.g. for Spark 4.2:
+
+        mvn -Dspark.version=4.2.0 -Dscala.version=2.13.18 \
+            -Djackson.version=2.21.2 \
+            -Dbundle.artifact=interceptor-bundle-spark-4.2_2.13 \
+            test-compile spark-mutation-testing:mutate -Pweak
+
+      (jackson per the target line's spark-parent pin; see
+      docs/TEST_STRATEGY.md.)
+    -->
+    <bundle.artifact>interceptor-bundle-spark-3.5_2.13</bundle.artifact>
+  </properties>
+
   <name>spark-java-pipeline</name>
   <description>
     Java 17 / JUnit 5 example pipeline for the WP-15 end-to-end
@@ -51,11 +68,13 @@
 
     <!--
       Required for plain `mvn test`: MutatorSparkExtension lives here. The
-      mutation plugin adds the same jar at mutate time.
+      mutation plugin adds the matching thin shim at mutate time. The artifact
+      follows ${bundle.artifact} so the example can be retargeted to another
+      supported Spark line (see the properties block above).
     -->
     <dependency>
       <groupId>io.github.wpunit13</groupId>
-      <artifactId>interceptor-bundle-spark-3.5_2.13</artifactId>
+      <artifactId>${bundle.artifact}</artifactId>
       <version>1.0.0-SNAPSHOT</version>
       <scope>test</scope>
     </dependency>

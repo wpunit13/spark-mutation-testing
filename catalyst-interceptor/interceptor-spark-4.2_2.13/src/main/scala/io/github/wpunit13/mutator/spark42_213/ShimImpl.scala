@@ -1,4 +1,4 @@
-package io.github.wpunit13.mutator.spark35
+package io.github.wpunit13.mutator.spark42_213
 
 import io.github.wpunit13.mutator.api._
 import org.apache.spark.sql.catalyst.expressions.{
@@ -12,17 +12,22 @@ import org.apache.spark.sql.catalyst.plans.logical.{Aggregate, Filter, Join, Log
 import org.apache.spark.sql.types.BooleanType
 
 /**
- * Version-agnostic mutation logic shared by the Spark 3.5.x / Scala 2.12 and
- * 2.13 shims. Every mutation rule lives here so the two Scala-binary shims
- * cannot drift. The concrete `ShimImpl` in each `interceptor-spark-3.5_*`
- * module supplies only [[supportedVersion]].
+ * PlanMutatorShim for the Spark 4.2.x / Scala 2.13 combination (WP-20).
  *
- * This source is compiled into each Scala-binary shim (via
- * build-helper-maven-plugin add-source), never shipped as its own artifact,
- * because it references `spark-catalyst_${scala.binary.version}` which differs
- * per combination.
+ * The mutation rules and the canonicalization grammar are byte-for-byte the
+ * 3.5 engine's semantics: the golden cross-version test in this module pins
+ * `canonicalExprSig` / `NodeCoordinate` / `MutantID` output to the values the
+ * 3.5 shims produce for the same canonical queries, so a coordinate computed
+ * under 3.5 addresses the same logical mutation under 4.2. Compatibility was
+ * proven by compiling (VERSION_ADDITION_SOP step 2); the compiler named the
+ * only Spark-4.x surface differences, and the formulas were never touched.
+ *
+ * Spark 4.x is Scala 2.13-only, so this minor line has a single Scala-binary
+ * combination and the logic lives here directly (no per-minor shared base).
  */
-abstract class Spark35ShimBase extends PlanMutatorShim {
+class ShimImpl extends PlanMutatorShim {
+
+  override val supportedVersion: SparkShimVersion = SparkShimVersion("4.2", "2.13")
 
   override def classify(
     node: LogicalPlan,
@@ -390,16 +395,8 @@ abstract class Spark35ShimBase extends PlanMutatorShim {
    * is the attribute's zero-based position in `node.output`. Attributes
    * absent from `node.output` (legitimate for join conditions referencing
    * child-only attributes) collapse to the single deterministic sentinel `#x`.
-   *
-   * Note on Spark 3.5.x: AttributeReference.sql renders `qualifier.name` and
-   * carries NO `#<exprId>` suffix, so the §4.3 "replace the #<exprId> suffix"
-   * mechanics degenerate to a no-op here and qualifiers/names would leak into
-   * the signature. The spec's stated intent ("replaces every attribute
-   * reference with a positional placeholder rather than its exprId") is
-   * implemented literally instead: each attribute's whole rendered token is
-   * replaced by `#<ordinal>`. This keeps the exprSig byte-identical across
-   * independent builds (different exprIds, aliases and names) and across
-   * Spark versions.
+   * Identical to the 3.5 shims' grammar — the golden cross-version test pins
+   * byte-identity across versions.
    *
    * Replacements run longest-token-first so a token that is a prefix of
    * another (e.g. "A.id" vs "A.id2") can never corrupt the longer one.
@@ -408,10 +405,9 @@ abstract class Spark35ShimBase extends PlanMutatorShim {
     val ordinals: Map[Long, Int] =
       node.output.zipWithIndex.map { case (a, i) => a.exprId.id -> i }.toMap
 
-    // `collection.Seq` (not the predef `Seq`) is intentional: `expr.collect`
-    // returns `scala.collection.Seq` in Spark 3.5, and the predef `Seq` is
-    // `immutable.Seq` under Scala 2.13 but `collection.Seq` under 2.12 — the
-    // fully-qualified form compiles under both Scala binaries.
+    // `collection.Seq` (not the predef `Seq`) mirrors the 3.5 grammar exactly:
+    // `expr.collect` returns `scala.collection.Seq` and the fully-qualified
+    // form is independent of the predef aliasing.
     val attrs: collection.Seq[AttributeReference] =
       expr.collect { case a: AttributeReference => a }.distinct
 

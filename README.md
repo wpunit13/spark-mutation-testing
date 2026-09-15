@@ -5,7 +5,7 @@
   </p>
   <p align="center">
     <img src="https://img.shields.io/badge/Python-3.9%2B-3776AB" alt="Python 3.9+">
-    <img src="https://img.shields.io/badge/Spark-3.5.x-E25A1C" alt="Spark 3.5.x">
+    <img src="https://img.shields.io/badge/Spark-3.5.x%20%7C%204.2.x-E25A1C" alt="Spark 3.5.x | 4.2.x">
     <img src="https://img.shields.io/badge/Scala-2.13-DC322F" alt="Scala 2.13">
     <img src="https://img.shields.io/badge/status-active%20development-brightgreen" alt="Status">
   </p>
@@ -131,11 +131,13 @@ the whole point.** See `examples/pyspark-pipeline/` for a runnable proof.
 
 - **PySpark**, end-to-end, via the `pytest` plugin (baseline, fail-fast loop, timeout watchdog, circuit breaker).
 - **Java & Scala pipelines**, end-to-end, via the Maven plugin (`spark-mutation-testing:mutate`) and the JUnit 5 bridge (`mutator-junit5`).
-- **Spark 3.5.x / Scala 2.12 + 2.13** shims.
+- **Spark 3.5.x / Scala 2.12 + 2.13** shims and **Spark 4.2.x / Scala 2.13** shim, with pinned cross-version goldens (a coordinate computed under 3.5 addresses the same logical mutation under 4.2).
 - **Mutator families** — Join (`INNER → LEFT`/`CROSS`/`ANTI`), Filter (`A ∧ B → A`/`B`/`false`/`¬P`), Aggregate, Window, Null-Coalesce, Project.
+- **CI version matrix** — one leg per supported Spark/Scala combination (`3.5_2.12`, `3.5_2.13`, `4.2_2.13`), each verifying its shim's goldens and its bundled wheel jar.
 
-Planned next: the Spark-version matrix with a CI matrix, first-class ScalaTest
-support (WP-18, deferred), and governance gates.
+Planned next: filling the N-2 window (Spark 4.1/4.0 combinations via the
+[version-addition SOP](docs/VERSION_ADDITION_SOP.md)), first-class ScalaTest
+support (WP-18, deferred), and further governance gates.
 
 ---
 
@@ -204,6 +206,7 @@ docs/                  core idea, architecture, contracts, guides, work packages
 - [Releasing](docs/RELEASING.md) — the release runbook: version model, the ritual, guard rails.
 - [Scala pipelines](docs/SCALA_PIPELINES.md) — Scala-based Spark pipeline support (JUnit 5 today; ScalaTest status).
 - [Contracts](docs/CONTRACTS.md) — the frozen API surface (contributor reference).
+- [Test & verification strategy](docs/TEST_STRATEGY.md) — what proves what, the regression net, and how to verify a new Spark version.
 - [Adding a Spark version](docs/VERSION_ADDITION_SOP.md) — the runbook for a new shim.
 
 ---
@@ -211,5 +214,5 @@ docs/                  core idea, architecture, contracts, guides, work packages
 ## Status
 
 Active development. PySpark, Java, and Scala (JUnit 5-in-Scala) pipelines on
-Spark 3.5.x are usable end-to-end; the Spark-version matrix, the ScalaTest
-bridge, and governance gates are planned.
+Spark 3.5.x and 4.2.x are usable end-to-end; N-2 window fill-in (4.1/4.0), the
+ScalaTest bridge, and further governance gates are planned.

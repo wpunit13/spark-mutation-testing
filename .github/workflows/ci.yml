@@ -7,7 +7,10 @@ on:
     branches: ["**"]
 
 jobs:
-  build-and-test:
+  # WP-20: global checks run ONCE — they are version-independent (the
+  # no-spark-imports gate covers every module in the reactor; the version-
+  # hygiene guard is a PR-merge guard).
+  checks:
     runs-on: ubuntu-latest
 
     steps:
@@ -29,6 +32,16 @@ jobs:
         env:
           BASE_REF: origin/${{ github.base_ref }}
 
+  # Fast lane (WP-20): single job on every push — full reactor build + full
+  # test suite + wheel bundling + Python tests. Bounds routine CI cost while
+  # the shim-matrix job below carries the per-version verification.
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
@@ -46,6 +59,55 @@ jobs:
 
       - name: Bundle jars
         run: python python/build_hooks/bundle_jars.py
+
+      - name: Install Python package and run tests
+        run: |
+          cd python
+          pip install -e '.[dev]'
+          python -m pytest -v
+
+  # WP-20 version matrix: one leg per supported Spark/Scala combination. The
+  # two key sets (SparkVersionDetector.SUPPORTED_VERSIONS and VERSION_MATRIX)
+  # must stay identical — python/tests/test_version_detect.py asserts the
+  # parity, so a combination added to one side without the other fails every
+  # leg. Trigger policy: pull_request + push to main only, to bound CI cost
+  # (the fast lane above covers routine branch pushes).
+  shim-matrix:
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        combo: ["3.5_2.12", "3.5_2.13", "4.2_2.13"]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: 'maven'
+
+      - name: Build reactor (all shims compile)
+        run: mvn -B clean install -DskipTests
+
+      - name: Verify shim ${{ matrix.combo }} tests (goldens)
+        run: mvn -B test -pl catalyst-interceptor/interceptor-spark-${{ matrix.combo }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+
+      - name: Bundle jars
+        run: python python/build_hooks/bundle_jars.py
+
+      - name: Assert ${{ matrix.combo }} jar is bundled
+        run: test -f python/pytest_spark_mutator/jars/interceptor-spark-${{ matrix.combo }}.jar
 
       - name: Install Python package and run tests
         run: |

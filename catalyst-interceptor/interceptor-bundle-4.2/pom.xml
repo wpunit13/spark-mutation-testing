@@ -11,67 +11,53 @@
     <relativePath>../../pom.xml</relativePath>
   </parent>
 
-  <artifactId>interceptor-bundle-spark-3.5_2.12</artifactId>
+  <artifactId>interceptor-bundle-spark-4.2_2.13</artifactId>
   <packaging>jar</packaging>
 
-  <name>interceptor-bundle-spark-3.5_2.12</name>
+  <name>interceptor-bundle-spark-4.2_2.13</name>
   <description>
     Produces the self-contained fat jar that the Python wheel mounts via --jars,
-    for Spark 3.5.x / Scala 2.12 (WP-19 multi-shim wheel).
+    for Spark 4.2.x / Scala 2.13 (WP-20).
 
-    WHY A SIBLING MODULE
-    --------------------
-    The pytest plugin mounts exactly ONE jar; a bundle must therefore contain
-    exactly ONE shim. The 2.12 shim jar carries its own 2.12-compiled copies of
-    the version-agnostic api classes (the shim module recompiles them for its
-    Scala binary), so bundling both shims into one jar would both duplicate the
-    api classes and put two PlanMutatorShim services on one classpath — the
-    exact packaging error ShimDispatcher fails loudly on. Following the
-    interceptor-bundle module's own guidance ("when a second Spark version is
-    added, give it its own bundle module"), this module mirrors that shade
-    configuration for the 2.12 combination.
-
-    LINKAGE STATUS (read before relying on this jar)
-    ------------------------------------------------
-    The non-shim Scala layers (api, dispatch, runtime) are consumed from the
-    reactor, which compiles them against the reactor-default Scala 2.13; only
-    the shim layer (Spark35ShimBase + ShimImpl) is 2.12-compiled. The erased
-    JVM descriptors of the SPI differ between Scala 2.12 and 2.13 (e.g. the
-    `Seq` in PlanMutatorShim.classify erases to different types), so mounting
-    this jar on a 2.12-built PySpark is NOT yet proven to link. The api classes
-    are taken from the reactor artifact (shade-excluding the shim jar's copies)
-    so exactly one api copy ships, paired with the dispatch/runtime layers it
-    was compiled against. Full 2.12 support requires per-combination
-    compilation of api/dispatch/runtime — flagged as a spec gap in the WP-19
-    final report.
+    WHY THIS BUNDLE RECOMPILES THE VERSION-AGNOSTIC LAYERS
+    ------------------------------------------------------
+    The 3.5 bundles ship api/dispatch/runtime classes compiled against Spark
+    3.5.3. Those classes are SOURCE-identical here, but a Spark 4.2 driver
+    cannot link against classes whose erased Catalyst descriptors were built
+    for 3.5 when the 4.2 Catalyst signatures differ. This module therefore
+    recompiles interceptor-api, interceptor-dispatch and interceptor-runtime
+    FROM SOURCE (build-helper add-source) against THIS combination's Spark
+    4.2.0 / Scala 2.13.18, exactly as the WP-20 spike proved possible, and
+    pairs them with the 4.2-compiled shim. mutator-core is pure Java (no Spark
+    imports, enforced by the CI gate) and is consumed as the reactor artifact.
 
     NO PACKAGE RELOCATION
     ---------------------
-    Same rationale as interceptor-bundle: relocation would rename the
+    Same rationale as the other bundles: relocation would rename the
     PlanMutatorShim interface named in spark.sql.extensions and break the
-    ServiceLoader contract. Distinct shims live in distinct packages and the
-    plugin mounts exactly one bundle per session.
+    ServiceLoader contract. The plugin mounts exactly one bundle per session.
 
     Verify after building:
-      jar tf target/interceptor-spark-3.5_2.12.jar | grep -E \
+      jar tf target/interceptor-spark-4.2_2.13.jar | grep -E \
         "MutatorSparkExtension|MutantRegistry|ShimImpl|META-INF/services"
     All four must be present, and the services file must be named
       META-INF/services/io.github.wpunit13.mutator.api.PlanMutatorShim
     containing the UNRELOCATED implementation class name
-    (io.github.wpunit13.mutator.spark35_212.ShimImpl).
+    (io.github.wpunit13.mutator.spark42_213.ShimImpl).
   </description>
 
   <properties>
-    <!-- Module-local pin for the 2.12 combination, mirroring interceptor-spark-3.5_2.12. -->
-    <spark.version>3.5.3</spark.version>
-    <scala.version>2.12.18</scala.version>
-    <scala.binary.version>2.12</scala.binary.version>
+    <!-- Module-local pin for the 4.2 combination, mirroring interceptor-spark-4.2_2.13. -->
+    <spark.version>4.2.0</spark.version>
+    <scala.version>2.13.18</scala.version>
+    <scala.binary.version>2.13</scala.binary.version>
   </properties>
 
   <dependencies>
     <!--
-      All five bundled modules at compile scope so the shade plugin includes
-      them. Spark itself stays provided/excluded and is never bundled.
+      The 4.2 shim (brings ShimImpl + its META-INF/services entry) and the
+      pure-Java core. The version-agnostic Scala layers are NOT taken as
+      artifacts: they are recompiled from source below against Spark 4.2.
     -->
     <dependency>
       <groupId>io.github.wpunit13</groupId>
@@ -79,21 +65,17 @@
     </dependency>
     <dependency>
       <groupId>io.github.wpunit13</groupId>
-      <artifactId>interceptor-api</artifactId>
+      <artifactId>interceptor-spark-4.2_2.13</artifactId>
     </dependency>
+
+    <!--
+      Compile-time-only logging API for the recompiled runtime layer (provided:
+      the Spark 4.2 driver supplies slf4j-api and its binding at runtime).
+    -->
     <dependency>
-      <groupId>io.github.wpunit13</groupId>
-      <artifactId>interceptor-dispatch</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>io.github.wpunit13</groupId>
-      <artifactId>interceptor-runtime</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>io.github.wpunit13</groupId>
-      <artifactId>interceptor-spark-3.5_2.12</artifactId>
-      <!-- Version-free: pinned by the root pom's dependencyManagement, per the
-           reactor convention that child modules declare no versions. -->
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-api</artifactId>
+      <scope>provided</scope>
     </dependency>
 
     <dependency>
@@ -109,9 +91,35 @@
   </dependencies>
 
   <build>
-    <finalName>interceptor-spark-3.5_2.12</finalName>
+    <finalName>interceptor-spark-4.2_2.13</finalName>
 
     <plugins>
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>build-helper-maven-plugin</artifactId>
+        <version>3.5.0</version>
+        <executions>
+          <execution>
+            <id>add-version-agnostic-sources</id>
+            <phase>generate-sources</phase>
+            <goals>
+              <goal>add-source</goal>
+            </goals>
+            <configuration>
+              <sources>
+                <!-- Recompiled against THIS combination's Spark 4.2.0 (see description). -->
+                <source>${project.basedir}/../interceptor-api/src/main/scala</source>
+                <source>${project.basedir}/../interceptor-dispatch/src/main/scala</source>
+                <source>${project.basedir}/../interceptor-runtime/src/main/scala</source>
+              </sources>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>net.alchim31.maven</groupId>
+        <artifactId>scala-maven-plugin</artifactId>
+      </plugin>
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-shade-plugin</artifactId>
@@ -136,8 +144,8 @@
 
               <!--
                 Merges META-INF/services entries from all bundled artifacts.
-                Only the shim jar carries a services file here, so the merged
-                file names exactly one PlanMutatorShim implementation.
+                Only the shim jar carries a PlanMutatorShim services file here,
+                so the merged file names exactly one implementation.
               -->
               <transformers>
                 <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
@@ -161,20 +169,6 @@
                     <exclude>META-INF/*.RSA</exclude>
                     <exclude>META-INF/MANIFEST.MF</exclude>
                     <exclude>module-info.class</exclude>
-                  </excludes>
-                </filter>
-                <!--
-                  The 2.12 shim jar recompiles the version-agnostic api sources
-                  for its Scala binary, so its copies would overlap the reactor
-                  api artifact byte-for-different-byte. Exclude them so exactly
-                  one api copy ships (the reactor-built one, paired with the
-                  dispatch/runtime layers). Spark35ShimBase is NOT excluded: it
-                  exists only inside the shim jars and must stay.
-                -->
-                <filter>
-                  <artifact>io.github.wpunit13:interceptor-spark-3.5_2.12</artifact>
-                  <excludes>
-                    <exclude>io/github/wpunit13/mutator/api/**</exclude>
                   </excludes>
                 </filter>
               </filters>

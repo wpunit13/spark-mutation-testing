@@ -143,11 +143,11 @@ Due to frequent breaking changes in internal Catalyst AST case class signatures 
 
 ---
 
-### 7.2 Version Lifecycle Policy ($N-2$)
-To prevent maintenance sprawl and bloated dependencies, the project enforces a strict $N-2$ lifecycle policy:
+### 7.2 Version Lifecycle Policy (latest LTS + N-2)
+To prevent maintenance sprawl and bloated dependencies, the project enforces a strict lifecycle policy (revised WP-20):
 
-* **Scope:** Active support is limited to the current major/minor release of Apache Spark and the preceding two minor releases (e.g., Spark 4.0, 3.5, and 3.4).
-* **Deprecation Alignment:** Versions officially declared End-of-Life (EOL) by the Apache Software Foundation are dropped immediately by removing the corresponding version adapter module.
+* **Scope:** Active support covers the **latest LTS release line** of Apache Spark **plus** the current major/minor release and the preceding two minor releases (e.g., with Spark 4.2 current and 3.5 LTS: Spark 4.2 and 3.5; the 4.1/4.0 combinations may be added from the window at any time via the version-addition SOP).
+* **Deprecation Alignment:** Versions officially declared End-of-Life (EOL) by the Apache Software Foundation are dropped immediately by removing the corresponding version adapter module (e.g., Spark 3.4, EOL since October 2024, is not supported even though it once sat inside an N-2 window).
 * **Zero Refactoring on EOL:** Deprecating an older version must require zero alterations to core mutator logic or the Python/Maven harness—only deletion of the target shim module.
 
 ---

@@ -113,3 +113,6 @@ replay_pid*
 
 # Internal agent dispatch bundles (not part of the public documentation)
 prompts_execution/
+graphify-out
+.zed
+
