@@ -47,11 +47,17 @@ Annotate a test class with `@EnableSparkMutationTesting` (or register
 
 1. Ensures `MutatorSparkExtension` is active on the `SparkSession`.
 2. Runs the baseline (unmutated) pass, discovering candidates.
-3. On `afterAll`, runs the mutation loop **in-process** via reflection against
-   `@Test` methods, resetting Catalyst caches between mutants.
+3. On `afterAll`, runs the mutation loop **in-process** via reflection that
+   re-runs the suite's full class lifecycle per mutant — `@BeforeAll`, the
+   `@Test` methods (filtered by test-impact mapping), `@AfterAll` — mirroring
+   the fork-per-mutant path's fresh JVM (a `spark.stop()` in `@AfterAll` is
+   safe: the next re-run's `@BeforeAll` rebuilds the session), resetting
+   Catalyst caches between mutants.
 4. Writes the report and (optionally) applies the score gate.
 
-This path needs no Maven plugin declaration; it works anywhere JUnit 5 runs.
+This path needs no Maven plugin declaration; it works anywhere JUnit 5 runs —
+including Gradle's `test` task (thin path, no plugin):
+[`GRADLE.md`](GRADLE.md).
 
 ---
 

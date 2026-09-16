@@ -228,7 +228,7 @@ class CatalystMutationRule(shim: PlanMutatorShim, phase: CatalystMutationRule.Ph
         // plan clone, optimizer rebuilds, and predicate push-down.
         shim.classify(node, 0, -1).foreach { case (_, candidates) =>
           candidates.find(_.mutationIndex == meta.getMutationIndex).foreach { candidate =>
-            recordPendingRewrite(activeMutantId, candidate.coordinate.toHex)
+            recordPendingRewrite(activeMutantId, candidate.coordinate.toHex, node)
           }
         }
         plan
@@ -252,7 +252,7 @@ class CatalystMutationRule(shim: PlanMutatorShim, phase: CatalystMutationRule.Ph
       // was recorded.
       return plan
     }
-    val (pendingMutantId, shapeFreeKey) = pending
+    val pendingMutantId = pending.mutantId
     if (pendingMutantId != activeMutantId) {
       // Stale entry from a previous mutant; ignore it (never rewrite across
       // mutant boundaries).
@@ -276,6 +276,7 @@ class CatalystMutationRule(shim: PlanMutatorShim, phase: CatalystMutationRule.Ph
     }
 
     var matched: Option[LogicalPlan] = None
+    val shapeFreeKey = pending.shapeFreeKey
 
     def walk(node: LogicalPlan): Unit = {
       if (matched.isEmpty) {
@@ -298,6 +299,53 @@ class CatalystMutationRule(shim: PlanMutatorShim, phase: CatalystMutationRule.Ph
     }
 
     walk(plan)
+
+    if (matched.isEmpty) {
+      // Fallback: optimizer rewrites (constant/cast folding, alias removal,
+      // push-down rebuilds, column pruning) can change the analyzed node's
+      // expression tree AND reshape its output schema, so the shape-free key
+      // recorded at post-hoc no longer matches any node. Re-identify the
+      // matched node by its stable identity instead:
+      //   - node class,
+      //   - the recorded output columns must still be produced by the
+      //     candidate (recorded ⊆ candidate): predicate push-down can WIDEN a
+      //     Filter's schema (it moves below a Project onto the wider child),
+      //     while a candidate that LOST recorded columns is a different site
+      //     — refusing it prevents cross-branch rewrites,
+      //   - an inserted-null-guard check (predicate push-down splits analyzed
+      //     And-filters and inserts IsNotNull guards; mutating a pure guard
+      //     would under-apply the mutant and can fake a SURVIVED),
+      //   - a mutation-index availability check (the shim must actually offer
+      //     this index for the candidate's shape).
+      // Empty-schema stubs (e.g. the Project(Nil) ColumnPruning inserts under
+      // count(1)-style aggregates) are never matched: a rewrite against them
+      // would be a no-op masquerading as an applied mutation. Same "first node
+      // wins" ambiguity policy as the exact key; a miss here still leaves the
+      // honesty guard's not-applied classification intact.
+      def walkFallback(node: LogicalPlan): Unit = {
+        if (matched.isEmpty) {
+          val candidateFieldNames = node.schema.map(_.name).toSet
+          if (!node.getTagValue(AlreadyMutatedTag).contains(true) &&
+              node.schema.nonEmpty &&
+              node.getClass.getSimpleName == pending.nodeClass &&
+              (pending.referencedColumns.isEmpty ||
+                pending.referencedColumns.exists(candidateFieldNames.contains)) &&
+              !isInsertedNullGuard(node, pending.exprClasses) &&
+              offersMutationIndex(node, meta.getMutationIndex)) {
+            matched = Some(node)
+          }
+          if (matched.isEmpty) {
+            node.children.foreach(walkFallback)
+          }
+        }
+      }
+      walkFallback(plan)
+      matched.foreach { _ =>
+        CatalystMutationRule.log(
+          s"mutant $activeMutantId matched via identity fallback: the optimizer rewrote the " +
+            "analyzed node's expressions or pruned its output, so its shape-free key drifted")
+      }
+    }
 
     matched match {
       case None =>
@@ -335,6 +383,34 @@ class CatalystMutationRule(shim: PlanMutatorShim, phase: CatalystMutationRule.Ph
         plan.transformDown { case n if n eq node => rewritten }
     }
   }
+
+  /**
+   * Fallback guard — inserted-null-guard refusal. Predicate push-down splits
+   * an analyzed And-filter and INSERTS IsNotNull guards that the original
+   * node never had. A candidate whose every top-level expression is such a
+   * guard (and whose recorded expressions contained none) is an
+   * optimizer-inserted artifact, not the recorded node's descendant:
+   * mutating it under-applies the mutant and can fake a SURVIVED — the worst
+   * failure mode this tool produces. Everything else that offers the recorded
+   * mutation index is accepted: the optimizer legitimately ADDS conjuncts to
+   * join conditions and Alias wrappers to project lists, so a structural
+   * class-subset check would refuse legitimate evolutions.
+   */
+  private def isInsertedNullGuard(candidate: LogicalPlan, recordedExprClasses: Set[String]): Boolean =
+    candidate.expressions.nonEmpty &&
+      candidate.expressions.forall(_.getClass.getSimpleName == "IsNotNull") &&
+      !recordedExprClasses.contains("IsNotNull")
+
+  /**
+   * Fallback guard — the candidate must actually OFFER the recorded
+   * mutation index (e.g. keep-left/keep-right require a top-level And;
+   * window mutations require an order spec). Prevents the shim from throwing
+   * ShimMutationException on a shape-incompatible node mid-rewrite.
+   */
+  private def offersMutationIndex(node: LogicalPlan, mutationIndex: Int): Boolean =
+    shim.classify(node, 0, -1).exists { case (_, candidates) =>
+      candidates.exists(_.mutationIndex == mutationIndex)
+    }
 
   /**
    * Builds the schema's astDiffSnippet: "<before-fragment> => <after-fragment>",
@@ -482,17 +558,54 @@ object CatalystMutationRule {
   private[mutator] val AlreadyMutatedTag = TreeNodeTag[Boolean]("spark-mutator.alreadyMutated")
 
   /**
-   * Cross-phase handoff from PostHoc (match) to Optimizer (rewrite):
-   * (mutantId, shapeFreeCoordinateHex). A JVM-global reference — deliberately
-   * NOT a node tag — because QueryExecution clones the analyzed plan before
-   * optimization and node tags do not survive the clone.
+   * Cross-phase handoff from PostHoc (match) to Optimizer (rewrite).
+   *
+   * @param mutantId     the mutant the pending rewrite belongs to.
+   * @param shapeFreeKey the matched node's root-classification coordinate —
+   *                     primary match key. Optimizer rewrites (constant/cast
+   *                     folding, alias removal, push-down rebuilds) can change
+   *                     the analyzed node's expression tree, so this key can
+   *                     drift; nodeClass + referencedColumns + exprClasses
+   *                     are the stable fallback.
+   * @param nodeClass    simple class name of the matched node.
+   * @param referencedColumns the attribute names the recorded node's
+   *                     expressions reference. Schema width evolves in BOTH
+   *                     directions across replanning (push-down widens a
+   *                     Filter below a Project; pruning narrows
+   *                     joins/projects), so width is not compared — the
+   *                     fallback requires only that the evolved node still
+   *                     references at least one recorded column (non-empty
+   *                     overlap).
+   * @param exprClasses  every expression-class simple name appearing in the
+   *                     recorded node's expressions. Folding only removes
+   *                     classes, so an evolved candidate's top-level classes
+   *                     must be a subset; optimizer-INSERTED expressions
+   *                     (IsNotNull guards) introduce new classes and are
+   *                     excluded.
+   *
+   * A JVM-global reference — deliberately NOT a node tag — because
+   * QueryExecution clones the analyzed plan before optimization and node tags
+   * do not survive the clone.
    */
-  private val pendingRewrite = new AtomicReference[(String, String)](null)
+  private[mutator] final case class PendingRewrite(
+      mutantId: String,
+      shapeFreeKey: String,
+      nodeClass: String,
+      referencedColumns: Set[String],
+      exprClasses: Set[String])
 
-  private def recordPendingRewrite(mutantId: String, shapeFreeKey: String): Unit =
-    pendingRewrite.set((mutantId, shapeFreeKey))
+  private val pendingRewrite = new AtomicReference[PendingRewrite](null)
 
-  private def peekPendingRewrite(): (String, String) = pendingRewrite.get()
+  private def recordPendingRewrite(
+      mutantId: String, shapeFreeKey: String, node: LogicalPlan): Unit =
+    pendingRewrite.set(PendingRewrite(
+      mutantId,
+      shapeFreeKey,
+      node.getClass.getSimpleName,
+      node.expressions.flatMap(_.references).map(_.name).toSet,
+      node.expressions.flatMap(_.collect { case e => e.getClass.getSimpleName }).toSet))
+
+  private def peekPendingRewrite(): PendingRewrite = pendingRewrite.get()
 
   /** One-shot consumption after a successful rewrite. */
   private def consumePendingRewrite(): Unit = pendingRewrite.set(null)

@@ -126,6 +126,43 @@ class SparkMutatorExtensionTest {
         }
     }
 
+    /**
+     * Mirrors the real-world suite shape (examples/spark-java-pipeline): the
+     * session lives in a STATIC field created by {@code @BeforeAll} and stopped
+     * by {@code @AfterAll}. The extension's in-process loop runs AFTER the
+     * outer run's @AfterAll, so without full-lifecycle re-runs every mutant
+     * re-run would execute against the stopped session and be classified
+     * ERRORED instead of KILLED/SURVIVED.
+     */
+    @EnableSparkMutationTesting
+    static class StaticSessionLifecycleTestCase {
+
+        private static SparkSession spark;
+
+        @BeforeAll
+        static void setUp() {
+            spark = SparkSession.builder()
+                    .master("local[1]")
+                    .appName("StaticSessionLifecycleTestCase")
+                    .config("spark.sql.extensions", "io.github.wpunit13.mutator.MutatorSparkExtension")
+                    .config("spark.ui.enabled", "false")
+                    .getOrCreate();
+        }
+
+        @AfterAll
+        static void tearDown() {
+            if (spark != null) {
+                spark.stop();
+            }
+        }
+
+        @Test
+        void testHardened() {
+            Dataset<Row> df = spark.range(0, 5).toDF("id").filter("id > 2");
+            assertEquals(2L, df.count());
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Specifications Verification Tests
     // -----------------------------------------------------------------------
@@ -211,6 +248,36 @@ class SparkMutatorExtensionTest {
 
         Path defaultReport = Path.of("target", "spark-mutator-reports", "mutation-report.json");
         assertTrue(Files.exists(defaultReport), "Expected default target/spark-mutator-reports/mutation-report.json to exist");
+    }
+
+    @Test
+    void fullLifecycleReRunsClassifyMutantsAgainstALiveSession() throws Exception {
+        LauncherDiscoveryRequest request = LauncherDiscoveryRequestBuilder.request()
+                .selectors(DiscoverySelectors.selectClass(StaticSessionLifecycleTestCase.class))
+                .build();
+        Launcher launcher = LauncherFactory.create();
+        launcher.execute(request);
+
+        Path reportFile = tempDir.resolve("mutation-report.json");
+        assertTrue(Files.exists(reportFile), "mutation-report.json should be written");
+
+        JsonNode report = mapper.readTree(reportFile.toFile());
+        int totalMutants = report.get("summary").get("totalMutants").asInt();
+        int killed = report.get("summary").get("killed").asInt();
+
+        StringBuilder stoppedSession = new StringBuilder();
+        for (JsonNode m : report.get("mutants")) {
+            String detail = m.get("result").get("failureDetailOrNull").asText("");
+            if (detail.contains("Cannot call methods on a stopped SparkContext")) {
+                stoppedSession.append(m.get("mutantId").asText()).append(": ").append(detail).append("\n");
+            }
+        }
+
+        assertTrue(totalMutants > 0, "Expected at least one mutant to be discovered");
+        assertTrue(stoppedSession.length() == 0,
+                "Mutant re-runs must re-run the @BeforeAll/@AfterAll lifecycle so each one gets a "
+                        + "live session; re-runs executed against the stopped session:\n" + stoppedSession);
+        assertTrue(killed > 0, "Expected the hardened assertion to kill at least one mutant");
     }
 
     @Test

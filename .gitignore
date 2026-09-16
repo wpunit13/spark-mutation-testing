@@ -115,4 +115,4 @@ replay_pid*
 prompts_execution/
 graphify-out
 .zed
-
+examples/spark-gradle-junit5/.gradle

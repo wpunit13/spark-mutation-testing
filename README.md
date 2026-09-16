@@ -201,10 +201,12 @@ docs/                  core idea, architecture, contracts, guides, work packages
 ## Documentation
 
 - [Core idea](docs/core_idea.md) — the vision and requirements.
+- [Catalyst internals](docs/CATALYST.md) — how Catalyst behaves and exactly how this library bends it (teaching document / whitepaper seed).
 - [Architecture](docs/ARCHITECTURE.md) — how it's built.
 - [Developer guide](docs/developer-guide.md) — orchestration modes, fork-boundary protocol, config, and the quality gate.
 - [Releasing](docs/RELEASING.md) — the release runbook: version model, the ritual, guard rails.
 - [Scala pipelines](docs/SCALA_PIPELINES.md) — Scala-based Spark pipeline support (JUnit 5 today; ScalaTest status).
+- [Gradle](docs/GRADLE.md) — the thin path: in-process mutation testing under Gradle's `test` task (no plugin).
 - [Contracts](docs/CONTRACTS.md) — the frozen API surface (contributor reference).
 - [Test & verification strategy](docs/TEST_STRATEGY.md) — what proves what, the regression net, and how to verify a new Spark version.
 - [Adding a Spark version](docs/VERSION_ADDITION_SOP.md) — the runbook for a new shim.

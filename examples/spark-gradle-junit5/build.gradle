@@ -1,0 +1,57 @@
+plugins {
+    id 'java'
+}
+
+repositories {
+    mavenLocal()
+    mavenCentral()
+}
+
+dependencies {
+    // Spark + Scala library resolved by Gradle itself — do NOT depend on the
+    // reactor for these.
+    testImplementation 'org.apache.spark:spark-sql_2.13:3.5.3'
+
+    // Engine artifacts: run `mvn -B clean install` at the repository root
+    // first so mavenLocal() can resolve the 1.0.0-SNAPSHOT coordinates.
+    testImplementation 'io.github.wpunit13:mutator-junit5:1.0.0-SNAPSHOT'
+    testImplementation 'io.github.wpunit13:interceptor-bundle-spark-3.5_2.13:1.0.0-SNAPSHOT'
+
+    testImplementation platform('org.junit:junit-bom:5.10.2')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+test {
+    useJUnitPlatform()
+
+    // REQUIRED. Copied verbatim from the root POM's spark.test.jvm.args
+    // (Java 17 --add-opens list). Spark fails without it.
+    jvmArgs '-Xmx2g', '-XX:+IgnoreUnrecognizedVMOptions',
+        '--add-opens=java.base/java.lang=ALL-UNNAMED',
+        '--add-opens=java.base/java.lang.invoke=ALL-UNNAMED',
+        '--add-opens=java.base/java.lang.reflect=ALL-UNNAMED',
+        '--add-opens=java.base/java.io=ALL-UNNAMED',
+        '--add-opens=java.base/java.net=ALL-UNNAMED',
+        '--add-opens=java.base/java.nio=ALL-UNNAMED',
+        '--add-opens=java.base/java.util=ALL-UNNAMED',
+        '--add-opens=java.base/java.util.concurrent=ALL-UNNAMED',
+        '--add-opens=java.base/java.util.concurrent.atomic=ALL-UNNAMED',
+        '--add-opens=java.base/sun.nio.ch=ALL-UNNAMED',
+        '--add-opens=java.base/sun.nio.cs=ALL-UNNAMED',
+        '--add-opens=java.base/sun.security.action=ALL-UNNAMED',
+        '--add-opens=java.base/sun.util.calendar=ALL-UNNAMED',
+        '-Djdk.reflect.useDirectMethodHandle=false',
+        '-Dio.netty.tryReflectionSetAccessible=true'
+
+    // Reports default to target/spark-mutator-reports (a Maven-ism); point
+    // them at Gradle's build dir instead.
+    systemProperty 'spark.mutator.outputDirectory',
+        layout.buildDirectory.dir('spark-mutator-reports').get().asFile.absolutePath
+
+    // Optional quality gate (unset = report only, never fail). Uncomment to
+    // enforce — with this deliberately weak suite the gate WILL fail, which
+    // is the point of the weak/hardened pairing:
+    //
+    // systemProperty 'spark.mutator.minMutationScore', '80'
+}

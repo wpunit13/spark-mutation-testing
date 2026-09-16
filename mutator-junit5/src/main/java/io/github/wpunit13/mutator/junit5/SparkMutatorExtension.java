@@ -20,7 +20,9 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.AfterAllCallback;
@@ -405,26 +407,52 @@ public class SparkMutatorExtension implements
         ctor.setAccessible(true);
         Object testInstance = ctor.newInstance();
 
+        List<Method> beforeAllMethods = findMethodsWithAnnotation(testClass, BeforeAll.class);
+        List<Method> afterAllMethods = findMethodsWithAnnotation(testClass, AfterAll.class);
         List<Method> beforeMethods = findMethodsWithAnnotation(testClass, BeforeEach.class);
         List<Method> afterMethods = findMethodsWithAnnotation(testClass, AfterEach.class);
         List<Method> testMethods = findTestMethods(testClass, mappedTestNames);
 
-        for (Method testMethod : testMethods) {
-            try {
-                for (Method before : beforeMethods) {
-                    before.setAccessible(true);
-                    before.invoke(testInstance);
-                }
-                testMethod.setAccessible(true);
-                testMethod.invoke(testInstance);
-            } finally {
-                for (Method after : afterMethods) {
-                    try {
-                        after.setAccessible(true);
-                        after.invoke(testInstance);
-                    } catch (Throwable ignored) {
-                        // AfterEach cleanup must never mask the test method's own outcome
+        // Re-run the FULL class lifecycle, not just the per-test one. The
+        // outer run's @AfterAll has typically already torn down whatever
+        // @BeforeAll built (e.g. spark.stop()), so a re-run that skipped
+        // @BeforeAll would execute every mutant against that dead session and
+        // classify them all ERRORED. Re-invoking @BeforeAll/@AfterAll per
+        // mutant mirrors the fork-per-mutant path, where each mutant gets a
+        // fresh JVM: SparkSession.builder().getOrCreate() sees the stopped
+        // context and builds a fresh one (SparkSession checks isStopped on the
+        // cached sessions; SparkContext.stop() cleared the active context).
+        for (Method beforeAll : beforeAllMethods) {
+            beforeAll.setAccessible(true);
+            beforeAll.invoke(testInstance);
+        }
+        try {
+            for (Method testMethod : testMethods) {
+                try {
+                    for (Method before : beforeMethods) {
+                        before.setAccessible(true);
+                        before.invoke(testInstance);
                     }
+                    testMethod.setAccessible(true);
+                    testMethod.invoke(testInstance);
+                } finally {
+                    for (Method after : afterMethods) {
+                        try {
+                            after.setAccessible(true);
+                            after.invoke(testInstance);
+                        } catch (Throwable ignored) {
+                            // AfterEach cleanup must never mask the test method's own outcome
+                        }
+                    }
+                }
+            }
+        } finally {
+            for (Method afterAll : afterAllMethods) {
+                try {
+                    afterAll.setAccessible(true);
+                    afterAll.invoke(testInstance);
+                } catch (Throwable ignored) {
+                    // AfterAll cleanup must never mask the test methods' own outcome
                 }
             }
         }
