@@ -170,6 +170,23 @@ def test_get_active_mutant_or_none_returns_none_when_idle(bridge, jvm):
     assert bridge.get_active_mutant_or_none() is None
 
 
+def test_get_applied_mutant_or_none_calls_jvm_path(bridge, jvm):
+    (
+        jvm.io.github.wpunit13.mutator.AppliedMutantTracker.lastOrNull
+    ).return_value = VALID_ID
+    assert bridge.get_applied_mutant_or_none() == VALID_ID
+    (
+        jvm.io.github.wpunit13.mutator.AppliedMutantTracker.lastOrNull
+    ).assert_called_once_with()
+
+
+def test_get_applied_mutant_or_none_returns_none_when_idle(bridge, jvm):
+    (
+        jvm.io.github.wpunit13.mutator.AppliedMutantTracker.lastOrNull
+    ).return_value = None
+    assert bridge.get_applied_mutant_or_none() is None
+
+
 # ---------------------------------------------------------------------------
 # reset_session_state pass-through semantics
 # ---------------------------------------------------------------------------

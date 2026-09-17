@@ -389,10 +389,13 @@ Two corollaries every engineer must internalize:
 1. **A harness that swallows the unknown-mutant error turns a broken handoff
    into "every mutant survived"** — the single worst failure mode. Fail
    loudly, always (`developer-guide.md` §7).
-2. **The score formula excludes ERRORED** —
+2. **The score formula excludes ERRORED and NOT_APPLIED** —
    `(killed + timedOut) / (killed + timedOut + survived)`. A run where 22 of
-   24 mutants errored printed `mutationScore: 100.0` (§12). ERRORED is honest
-   in the report but invisible to the gate — the motivation for WP-24.
+   24 mutants errored printed `mutationScore: 100.0` (§12). WP-24 now splits
+   the two ERRORED populations (designed not-applied vs real failure) and
+   gates them separately (`spark.mutator.maxNotAppliedRatio`,
+   `spark.mutator.maxErroredCount`) — but the score itself still cannot see
+   either population.
 
 ---
 

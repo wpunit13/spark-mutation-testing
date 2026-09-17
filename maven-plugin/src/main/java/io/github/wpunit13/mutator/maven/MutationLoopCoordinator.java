@@ -116,7 +116,7 @@ public class MutationLoopCoordinator {
         if (catalog.isEmpty()) {
             String reportPath = ReportWriter.writeReports(
                     outputDirectory, catalog, Map.of(), reportConfig());
-            return new MutationLoopResult(0, 0, 0, 0, 0, 0.0, reportPath);
+            return new MutationLoopResult(0, 0, 0, 0, 0, 0, 0.0, reportPath);
         }
 
         // 3. Mutation loop.
@@ -124,6 +124,7 @@ public class MutationLoopCoordinator {
         int survived = 0;
         int timedOut = 0;
         int errored = 0;
+        int notApplied = 0;
         for (MutantMetadata mutant : catalog) {
             String mutantId = mutant.getMutantId();
             String testFilter = mutant.getMappedTestIds().isEmpty()
@@ -146,6 +147,7 @@ public class MutationLoopCoordinator {
                 case SURVIVED -> survived++;
                 case TIMED_OUT -> timedOut++;
                 case ERRORED -> errored++;
+                case NOT_APPLIED -> notApplied++;
                 case SKIPPED -> { /* not produced here */ }
             }
         }
@@ -162,6 +164,7 @@ public class MutationLoopCoordinator {
                 survived,
                 timedOut,
                 errored,
+                notApplied,
                 score,
                 reportPath);
     }
@@ -279,10 +282,12 @@ public class MutationLoopCoordinator {
      * <ol>
      *   <li>timeout &rarr; TIMED_OUT (the marker is irrelevant: a fork that
      *       hung may have applied the mutation without finishing);</li>
-     *   <li>applied marker missing &rarr; ERRORED with the not-applied detail,
+     * <li>applied marker missing &rarr; NOT_APPLIED with the not-applied detail,
      *       regardless of exit code — a mutation that never executed must
      *       never be classified KILLED or SURVIVED (a fake survivor corrupts
-     *       the mutation score);</li>
+     *       the mutation score). WP-24 splits this out of ERRORED so the gate
+     *       can zero-tolerance real failures without punishing shape-dependent
+     *       not-applied mutants;</li>
      *   <li>otherwise classify from the exit code as before (KILLED /
      *       SURVIVED / ERRORED).</li>
      * </ol>
@@ -295,7 +300,9 @@ public class MutationLoopCoordinator {
             return new MutantResult(mutantId, MutantStatus.TIMED_OUT, elapsed, detail, now);
         }
         if (!AppliedMarkerStore.exists(outputDirectory, mutantId)) {
-            return new MutantResult(mutantId, MutantStatus.ERRORED, elapsed,
+            // WP-24: designed not-applied — the mutation never executed.
+            // Distinct from ERRORED (harness/engine failure).
+            return new MutantResult(mutantId, MutantStatus.NOT_APPLIED, elapsed,
                     "mutation was not applied (coordinate matched no plan node)", now);
         }
         if (r.getExitCode() == 2) {
@@ -352,6 +359,7 @@ public class MutationLoopCoordinator {
         private final int survived;
         private final int timedOut;
         private final int errored;
+        private final int notApplied;
         private final double mutationScore;
         private final String reportPath;
 
@@ -361,6 +369,7 @@ public class MutationLoopCoordinator {
                 int survived,
                 int timedOut,
                 int errored,
+                int notApplied,
                 double mutationScore,
                 String reportPath) {
             this.totalMutants = totalMutants;
@@ -368,6 +377,7 @@ public class MutationLoopCoordinator {
             this.survived = survived;
             this.timedOut = timedOut;
             this.errored = errored;
+            this.notApplied = notApplied;
             this.mutationScore = mutationScore;
             this.reportPath = reportPath;
         }
@@ -392,6 +402,10 @@ public class MutationLoopCoordinator {
             return errored;
         }
 
+        public int getNotApplied() {
+            return notApplied;
+        }
+
         public double getMutationScore() {
             return mutationScore;
         }
@@ -408,6 +422,7 @@ public class MutationLoopCoordinator {
                     ", survived=" + survived +
                     ", timedOut=" + timedOut +
                     ", errored=" + errored +
+                    ", notApplied=" + notApplied +
                     ", mutationScore=" + mutationScore +
                     ", reportPath='" + reportPath + '\'' +
                     '}';

@@ -5,6 +5,7 @@ import io.github.wpunit13.mutator.model.MutantResult;
 import io.github.wpunit13.mutator.model.MutantStatus;
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -31,6 +32,16 @@ public final class ReportWriter {
     private static final String PROP_EXCLUDED_MUTATORS = "spark.mutator.excludedMutators";
     private static final String PROP_TIMEOUT_MULTIPLIER = "spark.mutator.timeoutMultiplier";
     private static final String PROP_MIN_MUTATION_SCORE = "spark.mutator.minMutationScore";
+
+    /** WP-24 governance-gate knobs (one key, both surfaces). */
+    public static final String PROP_MAX_ERRORED_COUNT = "spark.mutator.maxErroredCount";
+    public static final String PROP_MAX_NOT_APPLIED_RATIO = "spark.mutator.maxNotAppliedRatio";
+
+    /** Default for {@code spark.mutator.maxNotAppliedRatio}: 20% of the run. */
+    public static final double DEFAULT_MAX_NOT_APPLIED_RATIO = 0.20;
+
+    /** Default for {@code spark.mutator.maxErroredCount}: zero tolerance. */
+    public static final int DEFAULT_MAX_ERRORED_COUNT = 0;
 
     private ReportWriter() {
     }
@@ -117,10 +128,10 @@ public final class ReportWriter {
 
     /**
      * Computes the mutation score from explicit catalog + outcome data.
-     * Mirrors {@link JsonReportWriter#mutationScore(int, int, int)}: errored
-     * and skipped mutants (and any catalogued mutant with no recorded outcome)
-     * are excluded from both numerator and denominator. A zero denominator
-     * yields 0.0 — never NaN, never Infinity.
+     * Mirrors {@link JsonReportWriter#mutationScore(int, int, int)}: errored,
+     * not-applied and skipped mutants (and any catalogued mutant with no
+     * recorded outcome) are excluded from both numerator and denominator. A
+     * zero denominator yields 0.0 — never NaN, never Infinity.
      */
     public static double computeScore(
             Collection<MutantMetadata> catalog,
@@ -138,11 +149,57 @@ public final class ReportWriter {
                 case TIMED_OUT -> timedOut++;
                 case SURVIVED -> survived++;
                 default -> {
-                    // ERRORED / SKIPPED are excluded from the score.
+                    // ERRORED / NOT_APPLIED / SKIPPED are excluded from the score.
                 }
             }
         }
         return JsonReportWriter.mutationScore(killed, timedOut, survived);
+    }
+
+    /**
+     * WP-24 governance gate: evaluates the run's outcome counts against the
+     * two population knobs and returns one human-readable message per
+     * violation (empty list = pass). Both orchestration paths call this with
+     * their own counts; the knob resolution (system properties vs Mojo
+     * parameters) stays per-surface per the one-key-both-surfaces convention.
+     *
+     * <ul>
+     *   <li><b>Real-failure ERRORED</b> (dead sessions, shim violations,
+     *       mutation crashes) — zero tolerance by default:
+     *       {@code errored > maxErroredCount} fails. A negative
+       *       {@code maxErroredCount} disables the check.</li>
+     *   <li><b>Designed not-applied</b> (nodes hidden inside caches, pruned
+     *       stubs, shapes that never execute) — ratio-gated:
+     *       {@code notApplied / (total - skipped) > maxNotAppliedRatio}
+       *       fails. A negative {@code maxNotAppliedRatio} disables the
+       *       check.</li>
+     * </ul>
+     *
+     * <p>The score formula is deliberately untouched: NOT_APPLIED and ERRORED
+     * are excluded from both terms, exactly as before the split.
+     */
+    public static List<String> evaluateGateViolations(
+            int total,
+            int errored,
+            int notApplied,
+            int skipped,
+            int maxErroredCount,
+            double maxNotAppliedRatio) {
+        List<String> violations = new ArrayList<>();
+        if (maxErroredCount >= 0 && errored > maxErroredCount) {
+            violations.add("real-failure ERRORED count " + errored
+                    + " exceeds maxErroredCount " + maxErroredCount
+                    + " (dead sessions, shim violations, or mutation crashes)");
+        }
+        if (maxNotAppliedRatio >= 0) {
+            int denominator = total - skipped;
+            double ratio = denominator <= 0 ? 0.0 : (notApplied / (double) denominator);
+            if (ratio > maxNotAppliedRatio) {
+                violations.add("not-applied ratio " + ratio + " (" + notApplied + "/"
+                        + denominator + ") exceeds maxNotAppliedRatio " + maxNotAppliedRatio);
+            }
+        }
+        return violations;
     }
 
     /**

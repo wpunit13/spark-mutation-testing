@@ -38,6 +38,7 @@ public final class HtmlReportWriter {
         int survived = 0;
         int timedOut = 0;
         int errored = 0;
+        int notApplied = 0;
         int skipped = 0;
         for (MutantMetadata meta : sorted) {
             MutantResult result = results.get(meta.getMutantId());
@@ -50,6 +51,7 @@ public final class HtmlReportWriter {
                 case SURVIVED -> survived++;
                 case TIMED_OUT -> timedOut++;
                 case ERRORED -> errored++;
+                case NOT_APPLIED -> notApplied++;
                 case SKIPPED -> skipped++;
             }
         }
@@ -91,6 +93,7 @@ public final class HtmlReportWriter {
                 .append("<div>Survived<span>").append(survived).append(SUMMARY_ITEM_CLOSE)
                 .append("<div>Timed out<span>").append(timedOut).append(SUMMARY_ITEM_CLOSE)
                 .append("<div>Errored<span>").append(errored).append(SUMMARY_ITEM_CLOSE)
+                .append("<div>Not applied<span>").append(notApplied).append(SUMMARY_ITEM_CLOSE)
                 .append("<div>Skipped<span>").append(skipped).append(SUMMARY_ITEM_CLOSE)
                 .append("</div>\n");
 

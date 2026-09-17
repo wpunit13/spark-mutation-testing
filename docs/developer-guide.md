@@ -137,8 +137,10 @@ declaration):
 | `outputDirectory` | `spark.mutator.outputDirectory` | `${project.build.directory}/spark-mutator-reports` | report dir |
 | `timeoutMultiplier` | `spark.mutator.timeoutMultiplier` | `2.0` | per-mutant deadline = `ceil(baseline × mult)` |
 | `minMutationScore` | `spark.mutator.minMutationScore` | `0.0` | score floor (`0.0` = gate off) |
+| `maxErroredCount` | `spark.mutator.maxErroredCount` | `0` | WP-24: max real-failure ERRORED (dead sessions, shim violations, mutation crashes); zero tolerance by default, negative disables |
+| `maxNotAppliedRatio` | `spark.mutator.maxNotAppliedRatio` | `0.20` | WP-24: max ratio of designed not-applied mutants (`notApplied / (total − skipped)`); negative disables |
 | `targetModules` | `spark.mutator.targetModules` | *(empty)* | comma-separated module-path prefixes limiting Discovery (see §3.1 for the engine-side semantics) |
-| `excludedMutators` | `spark.mutator.excludedMutators` | *(empty)* | comma-separated OperatorType names excluded from mutation; echoed into the report's `config.excludedMutators` |
+| `excludedMutators` | `spark.mutator.excludedMutators` | *(empty)* | comma-separated OperatorType names excluded from mutation; echoed into the report's `config.excludedMutators` block |
 
 **In-process gate** (JUnit 5 path):
 
@@ -194,14 +196,34 @@ The mutation score is:
 
 Errored and skipped mutants are excluded from both numerator and denominator.
 
-Both paths enforce the same floor, but through different channels:
+Both paths enforce the same floors, but through different channels:
 
 - **Maven plugin:** `MutateMojo` logs the failure and terminates the Maven JVM
-  with exit code 2 when `minMutationScore > 0.0 && score < minMutationScore`
-  (see the exit-code note below).
+  with exit code 2 when any gate is breached (see the exit-code note below).
 - **In-process:** `SparkMutatorExtension.afterAll` throws
-  `IllegalStateException` when `spark.mutator.minMutationScore` is set and
-  `score < min` ⇒ JUnit container fails ⇒ Surefire exits non-zero.
+  `IllegalStateException` ⇒ JUnit container fails ⇒ Surefire exits non-zero.
+
+Three gates, in enforcement order (all after the reports are flushed, so the
+artifacts always survive a failure):
+
+1. **WP-24 real-failure ERRORED (zero tolerance).**
+   `spark.mutator.maxErroredCount` (default `0`): a real-failure ERRORED — a
+   dead session, a shim violation, or a mutation crashing the pipeline — means
+   the harness or engine misbehaved. `errored > maxErroredCount` fails the
+   gate; negative disables.
+2. **WP-24 designed not-applied (ratio).**
+   `spark.mutator.maxNotAppliedRatio` (default `0.20`): the designed
+   not-applied population (nodes hidden inside caches, pruned stubs, shapes
+   that never execute) is shape-dependent and legitimate in bounded quantities
+   — `notApplied / (totalMutants − skipped) > maxNotAppliedRatio` fails the
+   gate; negative disables.
+3. **Score floor (opt-in).** `spark.mutator.minMutationScore` (default `0.0`
+   = off): `score < minScore` fails the gate.
+
+The WP-24 split exists because the score formula cannot see either ERRORED
+population (both are excluded from numerator and denominator) — the incident
+that motivated it printed `mutationScore: 100.0` while 22 of 24 mutants never
+executed.
 
 Semantics in both cases are **opt-in**: `0.0` / unset means "report only, never
 fail". The in-process path writes the report *before* throwing, so a failing
@@ -229,7 +251,7 @@ Written to the report directory (see §3.2):
 
 | File | Notes |
 |---|---|
-| `mutation-report.json` | schema v1 (`docs/CONTRACTS.md` §5.3) |
+| `mutation-report.json` | schema v2 (`docs/CONTRACTS.md` §5.3; v2 adds the WP-24 `NOT_APPLIED` split) |
 | `mutation-report.sarif` | SARIF 2.1.0; `SURVIVED` = `warning`, `ERRORED` = `error`, `KILLED`/`TIMED_OUT` omitted |
 | `mutation-report.html` | self-contained (inline CSS, no external assets) |
 

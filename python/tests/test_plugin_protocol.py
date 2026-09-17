@@ -50,9 +50,18 @@ class FakeBridge:
 
     def set_active_mutant(self, mutant_id):
         self._record("set_active_mutant", mutant_id)
+        # Simulate the engine's happy path: the Catalyst rule applied the
+        # mutation, so the tracker records the active mutant. Tests override
+        # `applied_mutant` to simulate drift (NOT_APPLIED classification).
+        self.applied_mutant = mutant_id
 
     def clear_active_mutant(self, mutant_id):
         self._record("clear_active_mutant", mutant_id)
+
+    def get_applied_mutant_or_none(self):
+        # Query, not an orchestrated step — deliberately not recorded in
+        # events so sequence assertions stay stable.
+        return self.applied_mutant
 
     def reset_session_state(self, jsparksession, since_timestamp_millis):
         self._record("reset_session_state", since_timestamp_millis)

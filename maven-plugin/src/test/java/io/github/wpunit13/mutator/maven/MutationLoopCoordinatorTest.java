@@ -117,10 +117,13 @@ class MutationLoopCoordinatorTest {
     }
 
     @Test
-    void forkSuccessWithoutAppliedMarkerIsReclassifiedErrored() throws Exception {
+    void forkSuccessWithoutAppliedMarkerIsReclassifiedNotApplied() throws Exception {
         // Pre-WP-17 this fork outcome classified as SURVIVED — the fake
         // survivor that corrupted the mutation score. The missing applied
-        // marker proves the mutation never executed.
+        // marker proves the mutation never executed. WP-24 splits this out of
+        // ERRORED: it is a designed, shape-dependent outcome, not a harness
+        // failure, so the gate can zero-tolerance real failures without
+        // punishing it.
         Map<String, SurefireExecutor.SurefireResult> outcomes = new LinkedHashMap<>();
         outcomes.put(MUTANT_1, SurefireExecutor.SurefireResult.success(60L));
 
@@ -132,14 +135,15 @@ class MutationLoopCoordinatorTest {
 
         MutationLoopCoordinator.MutationLoopResult result = coordinator.execute();
 
-        assertEquals(1, result.getErrored(), "not-applied mutant must be ERRORED");
+        assertEquals(1, result.getNotApplied(), "not-applied mutant must be NOT_APPLIED");
+        assertEquals(0, result.getErrored());
         assertEquals(0, result.getSurvived());
         assertEquals(0, result.getKilled());
         assertEquals(0, result.getTimedOut());
 
         JsonNode outcome = mapper.readTree(
                 tempDir.resolve("outcomes").resolve(MUTANT_1 + ".json").toFile());
-        assertEquals("ERRORED", outcome.get("status").asText());
+        assertEquals("NOT_APPLIED", outcome.get("status").asText());
         assertEquals("mutation was not applied (coordinate matched no plan node)",
                 outcome.get("failureDetailOrNull").asText());
     }
@@ -361,7 +365,7 @@ class MutationLoopCoordinatorTest {
         }) {
             @Override
             public MutationLoopResult execute() {
-                return new MutationLoopResult(2, 1, 1, 0, 0, 50.0, tempDir.resolve("mutation-report.json").toString());
+                return new MutationLoopResult(2, 1, 1, 0, 0, 0, 50.0, tempDir.resolve("mutation-report.json").toString());
             }
         };
 
@@ -433,7 +437,7 @@ class MutationLoopCoordinatorTest {
         }) {
             @Override
             public MutationLoopResult execute() {
-                return new MutationLoopResult(2, 1, 1, 0, 0, 50.0, tempDir.resolve("mutation-report.json").toString());
+                return new MutationLoopResult(2, 1, 1, 0, 0, 0, 50.0, tempDir.resolve("mutation-report.json").toString());
             }
         };
 

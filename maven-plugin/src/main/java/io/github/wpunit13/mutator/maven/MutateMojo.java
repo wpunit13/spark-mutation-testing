@@ -1,6 +1,7 @@
 package io.github.wpunit13.mutator.maven;
 
 import org.apache.maven.execution.MavenSession;
+import io.github.wpunit13.mutator.report.ReportWriter;
 import org.apache.maven.plugin.AbstractMojo;
 import org.apache.maven.plugin.BuildPluginManager;
 import org.apache.maven.plugin.MojoExecutionException;
@@ -79,6 +80,25 @@ public class MutateMojo extends AbstractMojo {
     private double minMutationScore = 0.0;
 
     /**
+     * WP-24 governance gate: maximum allowed real-failure ERRORED mutants
+     * (dead sessions, shim violations, mutation crashes). Default 0 — zero
+     * tolerance, since a real-failure ERRORED means the harness or engine
+     * misbehaved. Set negative to disable the check (complex plans with
+     * legitimate schema-breaking mutants may need to).
+     */
+    @Parameter(property = "spark.mutator.maxErroredCount", defaultValue = "0")
+    private int maxErroredCount = 0;
+
+    /**
+     * WP-24 governance gate: maximum allowed ratio of designed not-applied
+     * mutants, computed as {@code notApplied / (totalMutants - skipped)}.
+     * Default 0.20 — complex plans with cached branches legitimately produce
+     * some. Set negative to disable the check.
+     */
+    @Parameter(property = "spark.mutator.maxNotAppliedRatio", defaultValue = "0.20")
+    private double maxNotAppliedRatio = 0.20;
+
+    /**
      * Module-path prefixes limiting which candidates Discovery registers (WP-19).
      * Settable via {@code -Dspark.mutator.targetModules=a,b} or {@code <configuration>}
      * (comma-separated on the command line; one element per {@code <targetModules>}).
@@ -144,7 +164,8 @@ public class MutateMojo extends AbstractMojo {
                 + loopResult.getKilled() + " killed, "
                 + loopResult.getSurvived() + " survived, "
                 + loopResult.getTimedOut() + " timed out, "
-                + loopResult.getErrored() + " errored. "
+                + loopResult.getErrored() + " errored, "
+                + loopResult.getNotApplied() + " not applied. "
                 + "Mutation score: " + loopResult.getMutationScore() + "%");
         getLog().info("Reports written to: " + loopResult.getReportPath());
 
@@ -238,6 +259,22 @@ public class MutateMojo extends AbstractMojo {
      * tradeoff.
      */
     private void enforceQualityGate(MutationLoopCoordinator.MutationLoopResult loopResult) {
+        // WP-24 population gates first: real-failure ERRORED is zero-tolerance
+        // (a dead session or shim violation means the harness/engine is broken);
+        // the designed not-applied population is ratio-gated (complex plans
+        // with cached branches legitimately produce some).
+        List<String> populationViolations = ReportWriter.evaluateGateViolations(
+                loopResult.getTotalMutants(),
+                loopResult.getErrored(),
+                loopResult.getNotApplied(),
+                0,
+                maxErroredCount,
+                maxNotAppliedRatio);
+        if (!populationViolations.isEmpty()) {
+            populationViolations.forEach(getLog()::error);
+            getLog().error("Reports are on disk at: " + loopResult.getReportPath());
+            exitWithGateFailure(GATE_FAILURE_EXIT_CODE);
+        }
         if (minMutationScore > 0.0 && loopResult.getMutationScore() < minMutationScore) {
             getLog().error("Quality gate FAILED: mutation score (" + loopResult.getMutationScore()
                     + "%) is below minimum threshold (" + minMutationScore + "%).");

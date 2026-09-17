@@ -63,6 +63,11 @@ class SparkMutatorExtensionTest {
         System.clearProperty(SparkMutatorExtension.PROPERTY_MUTATOR_DISABLED);
         System.clearProperty(SparkMutatorExtension.PROPERTY_MUTATOR_ENABLED);
         System.setProperty("spark.mutator.outputDirectory", tempDir.toAbsolutePath().toString());
+        // The unit fixtures exercise classification, not gating — disable the
+        // WP-24 population gates (the gate evaluator has its own dedicated
+        // unit tests in mutator-core: ReportWriterGateTest).
+        System.setProperty("spark.mutator.maxErroredCount", "-1");
+        System.setProperty("spark.mutator.maxNotAppliedRatio", "-1");
     }
 
     @AfterEach
@@ -74,6 +79,8 @@ class SparkMutatorExtensionTest {
         System.clearProperty(SparkMutatorExtension.PROPERTY_MUTATOR_DISABLED);
         System.clearProperty(SparkMutatorExtension.PROPERTY_MUTATOR_ENABLED);
         System.clearProperty("spark.mutator.outputDirectory");
+        System.clearProperty("spark.mutator.maxErroredCount");
+        System.clearProperty("spark.mutator.maxNotAppliedRatio");
     }
 
     // -----------------------------------------------------------------------

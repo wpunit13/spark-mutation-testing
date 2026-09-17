@@ -16,7 +16,9 @@ from .exceptions import MutatorJvmError
 
 _MUTANT_ID_PATTERN = re.compile(r"^[0-9a-f]{16}$")
 
-_VALID_STATUSES = frozenset({"KILLED", "SURVIVED", "TIMED_OUT", "ERRORED", "SKIPPED"})
+_VALID_STATUSES = frozenset(
+    {"KILLED", "SURVIVED", "TIMED_OUT", "ERRORED", "NOT_APPLIED", "SKIPPED"}
+)
 
 
 class MutatorBridge:
@@ -88,6 +90,19 @@ class MutatorBridge:
         except Py4JJavaError as original:
             raise self._translate(
                 "MutantRegistry.getInstance().getActiveMutantOrNull", original
+            ) from original
+
+    def get_applied_mutant_or_none(self) -> str | None:
+        """The last mutant the engine recorded as actually applied (WP-24).
+
+        Mirrors ``AppliedMutantTracker.lastOrNull()``: ``None`` when the
+        active mutant's rewrite never landed on a plan node that executed.
+        """
+        try:
+            return self._mutator.AppliedMutantTracker.lastOrNull()
+        except Py4JJavaError as original:
+            raise self._translate(
+                "AppliedMutantTracker.lastOrNull", original
             ) from original
 
     def reset(self) -> None:

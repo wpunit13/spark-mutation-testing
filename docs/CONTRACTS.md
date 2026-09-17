@@ -486,7 +486,7 @@ public final class MutantResult {
     // Immutable; constructed exactly once by ReportSink.recordOutcome.
 }
 
-public enum MutantStatus { KILLED, SURVIVED, TIMED_OUT, ERRORED, SKIPPED }
+public enum MutantStatus { KILLED, SURVIVED, TIMED_OUT, ERRORED, NOT_APPLIED, SKIPPED }
 ```
 
 `SKIPPED` is included in the POJO enum (used by the pre-flight cardinality
@@ -495,12 +495,21 @@ classification does not enumerate it; `SKIPPED` mutants are explicitly
 excluded from the Mutation Score denominator (§5.4) to keep the score formula
 exactly as specified.
 
+`NOT_APPLIED` (WP-24, schema v2) marks a mutant whose rewrite never executed:
+the node was hidden inside an `InMemoryRelation` at execution, pruned to a
+stub, or its catalogued shape never ran. It is distinct from `ERRORED` (a
+harness/engine failure: dead session, shim violation, mutation crash) so the
+governance gate can zero-tolerance real failures without punishing
+shape-dependent not-applied mutants. `NOT_APPLIED` is excluded from the
+Mutation Score denominator and governed by
+`spark.mutator.maxNotAppliedRatio` instead.
+
 ### 5.3 JSON Schema — `mutation-report.json`
 
 ```json
 {
-  "$schema": "https://spark-mutator.wpunit13.io/schema/mutation-report/v1.json",
-  "schemaVersion": 1,
+  "$schema": "https://spark-mutator.wpunit13.io/schema/mutation-report/v2.json",
+  "schemaVersion": 2,
   "generatedAtEpochMillis": 1732000000000,
   "config": {
     "targetModules": ["my_pipeline.transforms"],
@@ -514,6 +523,7 @@ exactly as specified.
     "survived": 0,
     "timedOut": 0,
     "errored": 0,
+    "notApplied": 0,
     "skipped": 0,
     "mutationScore": 0.0
   },

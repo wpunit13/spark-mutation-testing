@@ -89,8 +89,8 @@ public final class SarifReportWriter {
 
     /**
      * Emits one SARIF result for SURVIVED ("warning") and ERRORED ("error")
-     * mutants; every other status (and any catalogued mutant with no recorded
-     * outcome) is omitted.
+     * mutants; every other status — KILLED, TIMED_OUT, SKIPPED, and the
+     * WP-24 NOT_APPLIED (not an actionable defect) — is omitted.
      */
     private static void appendResultIfReportable(
             ArrayNode sarifResults,

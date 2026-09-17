@@ -80,6 +80,8 @@ _PROP_TARGET_MODULES = "spark.mutator.targetModules"
 _PROP_EXCLUDED_MUTATORS = "spark.mutator.excludedMutators"
 _PROP_TIMEOUT_MULTIPLIER = "spark.mutator.timeoutMultiplier"
 _PROP_MIN_MUTATION_SCORE = "spark.mutator.minMutationScore"
+_PROP_MAX_ERRORED_COUNT = "spark.mutator.maxErroredCount"
+_PROP_MAX_NOT_APPLIED_RATIO = "spark.mutator.maxNotAppliedRatio"
 
 # Stash key under which the active _MutationSession is stored on the pytest
 # config; the single source of truth for "is the plugin active".
@@ -238,6 +240,34 @@ def pytest_sessionfinish(session, exitstatus) -> None:
         session.exitstatus = 2
         return
 
+    # WP-24 population gates: real-failure ERRORED is zero-tolerance (a dead
+    # session or shim violation means the harness/engine is broken); the
+    # designed not-applied population is ratio-gated. A negative knob disables
+    # its check.
+    errored = mut_session.results.get("ERRORED", 0)
+    not_applied = mut_session.results.get("NOT_APPLIED", 0)
+    skipped = mut_session.results.get("SKIPPED", 0)
+    total = sum(mut_session.results.values())
+    if errored > mut_session.config.max_errored_count:
+        print(
+            f"spark-mutator: real-failure ERRORED count {errored} exceeds "
+            f"max_errored_count {mut_session.config.max_errored_count}; "
+            "failing the run."
+        )
+        session.exitstatus = 2
+        return
+    if mut_session.config.max_not_applied_ratio >= 0:
+        denominator = total - skipped
+        ratio = (not_applied / denominator) if denominator > 0 else 0.0
+        if ratio > mut_session.config.max_not_applied_ratio:
+            print(
+                f"spark-mutator: not-applied ratio {ratio:.2f} "
+                f"({not_applied}/{denominator}) exceeds max_not_applied_ratio "
+                f"{mut_session.config.max_not_applied_ratio:.2f}; failing the run."
+            )
+            session.exitstatus = 2
+            return
+
 
 # ---------------------------------------------------------------------------
 # Module helpers
@@ -375,6 +405,8 @@ class _MutationSession:
             system.setProperty(_PROP_TARGET_MODULES, targets)
         system.setProperty(_PROP_TIMEOUT_MULTIPLIER, str(self.config.timeout_multiplier))
         system.setProperty(_PROP_MIN_MUTATION_SCORE, str(self.config.min_mutation_score))
+        system.setProperty(_PROP_MAX_ERRORED_COUNT, str(self.config.max_errored_count))
+        system.setProperty(_PROP_MAX_NOT_APPLIED_RATIO, str(self.config.max_not_applied_ratio))
         self._engine_config_applied = True
 
     def _set_file_path_hint(self, nodeid: str) -> None:
@@ -561,11 +593,12 @@ class _MutationSession:
             self.watchdog.disarm()
         if self.driver_unresponsive_error is not None:
             raise self.driver_unresponsive_error
-        return self._classify_mutant(deadline)
+        return self._classify_mutant(deadline, mutant_id)
 
-    def _classify_mutant(self, deadline: float) -> tuple:
-        # Precedence per §2.6. An escaped MutatorJvmError / unexpected
-        # exception is handled by the caller's broad except (ERRORED).
+    def _classify_mutant(self, deadline: float, mutant_id: str) -> tuple:
+        # Precedence per §2.6, mirroring the in-process loop: an escaped
+        # MutatorJvmError / unexpected exception is handled by the caller's
+        # broad except (ERRORED).
         if self.watchdog.fired and self.driver_unresponsive_error is None:
             return "TIMED_OUT", f"deadline {deadline:.1f}s exceeded"
         if self.driver_unresponsive_error is not None:
@@ -574,6 +607,16 @@ class _MutationSession:
             return (
                 "KILLED",
                 f"test failed under mutation: {self.mutation_failed_nodeid}",
+            )
+        # WP-24: the rewrite must have executed for a SURVIVED to be honest.
+        # The engine-side tracker records the applied fact at rewrite time;
+        # a stale or missing id means the mutation never landed on a plan
+        # node that ran.
+        applied = self.bridge.get_applied_mutant_or_none()
+        if applied != mutant_id:
+            return (
+                "NOT_APPLIED",
+                "mutation was not applied (coordinate matched no plan node)",
             )
         return "SURVIVED", None
 

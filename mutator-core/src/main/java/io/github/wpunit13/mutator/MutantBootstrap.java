@@ -27,6 +27,10 @@ public final class MutantBootstrap {
     public static final String PROP_OUTPUT_DIRECTORY = "spark.mutator.outputDirectory";
     public static final String PROP_MIN_MUTATION_SCORE = "spark.mutator.minMutationScore";
 
+    /** WP-24 governance-gate knobs (one key, both surfaces). */
+    public static final String PROP_MAX_ERRORED_COUNT = "spark.mutator.maxErroredCount";
+    public static final String PROP_MAX_NOT_APPLIED_RATIO = "spark.mutator.maxNotAppliedRatio";
+
     /** Magic value marking the externally-orchestrated baseline run. */
     public static final String PHASE_BASELINE = "baseline";
     /** Magic value marking an externally-orchestrated single-mutant run. */

@@ -373,6 +373,12 @@ class ComplexPlanStressTest {
     // ------------------------------------------------------------------
 
     private JsonNode runFixture(Class<?> fixtureClass, Path outputDir) {
+        // The stress fixture legitimately produces crash-class ERRORED
+        // (schema-breaking mutants) and designed not-applied (cache-hidden
+        // shapes) — disable the WP-24 population gates for the run; the
+        // assertions below pin the populations directly.
+        System.setProperty("spark.mutator.maxErroredCount", "-1");
+        System.setProperty("spark.mutator.maxNotAppliedRatio", "-1");
         System.setProperty("spark.mutator.outputDirectory", outputDir.toAbsolutePath().toString());
         LauncherDiscoveryRequest request = LauncherDiscoveryRequestBuilder.request()
                 .selectors(DiscoverySelectors.selectClass(fixtureClass))

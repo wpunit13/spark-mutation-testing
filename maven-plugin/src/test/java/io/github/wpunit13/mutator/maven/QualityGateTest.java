@@ -116,7 +116,7 @@ class QualityGateTest {
 
     private MutationLoopCoordinator.MutationLoopResult resultWithScore(double score) {
         return new MutationLoopCoordinator.MutationLoopResult(
-                2, 1, 1, 0, 0, score, tempDir.resolve("mutation-report.json").toString());
+                2, 1, 1, 0, 0, 0, score, tempDir.resolve("mutation-report.json").toString());
     }
 
     @Test
