@@ -130,6 +130,22 @@ add a Spark matrix; the architecture mounts exactly one shim per run.
 
 ---
 
+## Java floor policy
+
+The Java bytecode floor (`maven.compiler.release`, currently **17**) is
+**bound to the supported Spark matrix — it moves only at a Spark LTS
+transition that requires it, never independently.** Concretely: the floor is
+what the oldest supported Spark line pairs with (3.5 LTS ↔ Java 17); when a
+future Spark LTS (e.g. 4.5) both requires a newer JDK *and* the oldest line
+exits the N-2 window, the floor, the CI JDK (`ci.yml`'s two
+`setup-java` steps), and the version-addition motion land in one atomic PR —
+no skew window, no second matrix dimension (JDK × Spark combo) in between.
+Building or running on a newer JDK than the floor is always fine
+(`--release 17` compiles under any newer JDK; the shim-injected JVM args are
+forward-safe via `-XX:+IgnoreUnrecognizedVMOptions`).
+
+---
+
 ## Invariants (do not violate)
 
 1. **Never edit an existing shim, a sealed bundle, or the root `spark.version`.**
