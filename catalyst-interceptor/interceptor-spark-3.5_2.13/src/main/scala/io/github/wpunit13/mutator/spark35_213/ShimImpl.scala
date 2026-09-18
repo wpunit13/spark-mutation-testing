@@ -4,7 +4,7 @@ import io.github.wpunit13.mutator.api.SparkShimVersion
 import io.github.wpunit13.mutator.spark35.Spark35ShimBase
 
 /**
- * PlanMutatorShim implementation for the Spark 3.5.x / Scala 2.13 cell.
+ * PlanMutatorShim implementation for the Spark 3.5.x / Scala 2.13 combination.
  *
  * Instantiated via ServiceLoader, hence a plain class with a public no-arg
  * constructor (a Scala object would compile to a private-ctor singleton and

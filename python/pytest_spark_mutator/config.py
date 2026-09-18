@@ -25,6 +25,8 @@ _KNOWN_KEYS = frozenset(
         "excluded_mutators",
         "timeout_multiplier",
         "min_mutation_score",
+        "max_errored_count",
+        "max_not_applied_ratio",
         "output_dir",
         "requeue_on_crash",
         "control_channel_timeout_seconds",
@@ -40,6 +42,8 @@ class SparkMutatorConfig:
     excluded_mutators: list[str] = field(default_factory=list)
     timeout_multiplier: float = 2.0
     min_mutation_score: float = 80.0
+    max_errored_count: int = 0
+    max_not_applied_ratio: float = 0.2
     output_dir: str = "target/spark-mutator-reports"
     requeue_on_crash: bool = False
     control_channel_timeout_seconds: float = 5.0
@@ -96,6 +100,14 @@ class SparkMutatorConfig:
             kwargs["min_mutation_score"] = _coerce_float(
                 "min_mutation_score", table["min_mutation_score"]
             )
+        if "max_errored_count" in table:
+            kwargs["max_errored_count"] = _coerce_int(
+                "max_errored_count", table["max_errored_count"]
+            )
+        if "max_not_applied_ratio" in table:
+            kwargs["max_not_applied_ratio"] = _coerce_float(
+                "max_not_applied_ratio", table["max_not_applied_ratio"]
+            )
         if "output_dir" in table:
             kwargs["output_dir"] = table["output_dir"]
         if "requeue_on_crash" in table:
@@ -134,6 +146,21 @@ def _coerce_bool(key: str, value) -> bool:
         f"invalid value for {key!r} in [tool.spark-mutator]: "
         f"expected a boolean, got {type(value).__name__}"
     )
+
+
+def _coerce_int(key: str, value) -> int:
+    if isinstance(value, bool):
+        raise ValueError(
+            f"invalid value for {key!r} in [tool.spark-mutator]: "
+            f"expected an integer, got a boolean"
+        )
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"invalid value for {key!r} in [tool.spark-mutator]: "
+            f"{value!r} cannot be coerced to int"
+        ) from None
 
 
 def _coerce_float(key: str, value) -> float:

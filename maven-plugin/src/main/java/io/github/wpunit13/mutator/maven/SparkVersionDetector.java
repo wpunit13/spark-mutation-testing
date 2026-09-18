@@ -24,7 +24,7 @@ public class SparkVersionDetector {
     public static final String SPARK_SQL_PREFIX = "spark-sql_";
 
     public static final Set<String> SUPPORTED_VERSIONS =
-            Collections.unmodifiableSet(new TreeSet<>(Set.of("3.5_2.12", "3.5_2.13")));
+            Collections.unmodifiableSet(new TreeSet<>(Set.of("3.5_2.12", "3.5_2.13", "4.2_2.13")));
 
     private final String interceptorVersion;
 

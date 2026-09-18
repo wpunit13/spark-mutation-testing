@@ -36,9 +36,23 @@ does four things on `mvn spark-mutation-testing:mutate`:
 3. **Configure** Surefire: append
    `-Dspark.sql.extensions=io.github.wpunit13.mutator.MutatorSparkExtension` to
    `argLine` and add the interceptor JAR to `additionalClasspathElements`
-   (`SurefireConfigurator`).
+   (`SurefireConfigurator`). On modular runtimes (Java 9+) the configurator
+   also merges Spark's mandatory JVM opens (the `--add-opens` set plus the
+   Netty/reflect flags, verbatim from the root POM's `spark.test.jvm.args`
+   minus `-Xmx2g`) into `argLine` — without them the driver dies with
+   `InaccessibleObjectException` before any test runs. Disable with
+   `-Dspark.mutator.injectAddOpens=false` (e.g. fork JDK managed via
+   toolchains).
 4. **Run the mutation loop** (`MutationLoopCoordinator`): baseline → discover →
    fork-per-mutant → classify → merge → report → gate.
+
+> **At least one annotated class must run in each fork.** The
+> `SparkMutatorExtension` bridge (via `@EnableSparkMutationTesting`, a shared
+> base class, or equivalent registration) is what writes `catalog.json` on
+> baseline completion and the applied markers on mutant runs. If no annotated
+> class executes, the baseline fork hands back an empty catalog and the Mojo
+> writes a **silent empty report** (zero mutants, score 0.0%, exit 0) — check
+> the `Detected …` / mutant-count log lines to confirm discovery actually ran.
 
 ### 1.2 JUnit 5 in-process path
 
@@ -47,11 +61,31 @@ Annotate a test class with `@EnableSparkMutationTesting` (or register
 
 1. Ensures `MutatorSparkExtension` is active on the `SparkSession`.
 2. Runs the baseline (unmutated) pass, discovering candidates.
-3. On `afterAll`, runs the mutation loop **in-process** via reflection against
-   `@Test` methods, resetting Catalyst caches between mutants.
+3. On `afterAll`, runs the mutation loop **in-process** via reflection that
+   re-runs the suite's full class lifecycle per mutant — `@BeforeAll`, the
+   `@Test` methods (filtered by test-impact mapping), `@AfterAll` — mirroring
+   the fork-per-mutant path's fresh JVM (a `spark.stop()` in `@AfterAll` is
+   safe: the next re-run's `@BeforeAll` rebuilds the session), resetting
+   Catalyst caches between mutants.
 4. Writes the report and (optionally) applies the score gate.
 
-This path needs no Maven plugin declaration; it works anywhere JUnit 5 runs.
+This path needs no Maven plugin declaration; it works anywhere JUnit 5 runs —
+including Gradle's `test` task (thin path, no plugin):
+[`GRADLE.md`](GRADLE.md).
+
+> **One annotated class drives the loop.** In standalone mode the annotated
+> class's `afterAll` runs the full mutation loop and writes the report. The
+> tested configuration is exactly one such class per run (select it with
+> Surefire `<includes>` or a profile, as the examples do). Multiple annotated
+> classes in one run each trigger their own loop and re-write the report —
+> untested; the Maven plugin path is the mode designed for many classes.
+
+> **JVM opens on the in-process path.** Unlike the Maven plugin path (§1.1),
+> the extension cannot add JVM arguments after the JVM has started. When you
+> run in-process on Java 17+, your Surefire/Gradle config must carry Spark's
+> mandatory `--add-opens` set (the canonical list is the root POM's
+> `spark.test.jvm.args`, reproduced in [`GRADLE.md`](GRADLE.md) §3) — without
+> it the driver dies with `InaccessibleObjectException` before any test runs.
 
 ---
 
@@ -109,11 +143,23 @@ Two distinct namespaces must not be conflated.
 Set by `MutationLoopCoordinator` and read by `MutantBootstrap`
 (`mutator-core/.../MutantBootstrap.java`) and the JUnit 5 bridge.
 
+**End users set nothing here.** The first two rows are pure plumbing — the
+coordinator stamps them onto every Surefire fork it launches
+(`baselineProperties()` / `mutantProperties()`); setting them by hand corrupts
+the protocol (a stray `active.mutant` with no catalog behind it makes
+activation throw unknown-mutant). The last three rows are the §3.2 user
+parameters (`outputDirectory`, `targetModules`, `excludedMutators`) observed
+from the fork side: you configure them via the Mojo `<configuration>` or
+`-Dspark.mutator.*`, and the coordinator echoes the resolved values into each
+fork on this channel.
+
 | Property | Values | Meaning |
 |---|---|---|
-| `spark.mutator.phase` | `baseline` \| `mutant` (or unset) | External orchestration marker. Unset ⇒ standalone in-process mode |
-| `spark.mutator.active.mutant` | 16-char lowercase hex | Which mutant is ACTIVE in this fork |
+| `spark.mutator.phase` | `baseline` \| `mutant` (or unset) | External orchestration marker. Unset ⇒ standalone in-process mode. **Internal — never set by hand.** |
+| `spark.mutator.active.mutant` | 16-char lowercase hex | Which mutant is ACTIVE in this fork. **Internal — never set by hand.** |
 | `spark.mutator.outputDirectory` | file path | Report/output directory (same key as the user-facing config — one key, both surfaces) |
+| `spark.mutator.targetModules` | comma-separated module-path prefixes | Discovery registers a candidate only when the current file-path hint starts with one of the prefixes. Blank/unset ⇒ no filtering. With the property set while the hint is still the default `unknown` (no harness fed one), NOTHING is registered and a single warning is emitted — fail-safe, because silent full-catalog behavior would be the "every mutant survived" failure mode in disguise |
+| `spark.mutator.excludedMutators` | comma-separated OperatorType names (`JOIN`, `FILTER`, `AGGREGATE`, `WINDOW`, `PROJECT`, `OTHER`; case-insensitive) | Discovery skips excluded operators; the match/rewrite path refuses them even if a stale catalog entry exists (observable skip, never an error). Unrecognized tokens are ignored with a one-time warning. The Python path additionally accepts legacy mutator display names, enforced in the pytest plugin |
 
 The bridge reads these once at JVM startup and drives `MutantRegistry`, so the
 activation logic is **framework-agnostic** (JUnit 5, ScalaTest, … all just call
@@ -124,11 +170,60 @@ activation logic is **framework-agnostic** (JUnit 5, ScalaTest, … all just cal
 **Maven plugin parameters** (`mvn -D...=...` or `<configuration>` in the plugin
 declaration):
 
+
+Every entry is optional — omit a parameter and its default (column 3 of the
+table below) applies. The same values can be supplied per-invocation instead:
+`mvn -Dspark.mutator.minMutationScore=80 -Dspark.mutator.excludedMutators=WINDOW ...`.
+
 | Parameter | Property | Default | Meaning |
 |---|---|---|---|
 | `outputDirectory` | `spark.mutator.outputDirectory` | `${project.build.directory}/spark-mutator-reports` | report dir |
 | `timeoutMultiplier` | `spark.mutator.timeoutMultiplier` | `2.0` | per-mutant deadline = `ceil(baseline × mult)` |
 | `minMutationScore` | `spark.mutator.minMutationScore` | `0.0` | score floor (`0.0` = gate off) |
+| `maxErroredCount` | `spark.mutator.maxErroredCount` | `0` | WP-24: max real-failure ERRORED (dead sessions, shim violations, mutation crashes); zero tolerance by default, negative disables |
+| `maxNotAppliedRatio` | `spark.mutator.maxNotAppliedRatio` | `0.20` | WP-24: max ratio of designed not-applied mutants (`notApplied / (total − skipped)`); negative disables |
+| `targetModules` | `spark.mutator.targetModules` | *(empty)* | comma-separated module-path prefixes limiting Discovery (see §3.1 for the engine-side semantics) |
+| `excludedMutators` | `spark.mutator.excludedMutators` | *(empty)* | comma-separated OperatorType names excluded from mutation; echoed into the report's `config.excludedMutators` block |
+| `exitProcessOnGateFailure` | `spark.mutator.exitProcessOnGateFailure` | `true` | `false` ⇒ a gate violation throws `MojoFailureException` (Maven exit code 1, reactor honors `--fail-at-end`/`--fail-never`) instead of terminating the JVM with the dedicated exit code 2 — the multi-module escape hatch |
+| `injectAddOpens` | `spark.mutator.injectAddOpens` | `true` | inject Spark's mandatory modular-runtime JVM args (the `--add-opens` set) into Surefire's `argLine`; no-op on Java 8 |
+
+
+All parameters in a single `<configuration>` block:
+
+```xml
+<plugin>
+  <groupId>io.github.wpunit13</groupId>
+  <artifactId>spark-mutation-testing-maven-plugin</artifactId>
+  <version>1.0.0-SNAPSHOT</version>
+  <configuration>
+    <!-- Where the reports go (default: ${project.build.directory}/spark-mutator-reports) -->
+    <outputDirectory>${project.build.directory}/spark-mutator-reports</outputDirectory>
+
+    <!-- Per-mutant deadline = ceil(baseline run time × multiplier) -->
+    <timeoutMultiplier>2.0</timeoutMultiplier>
+
+    <!-- Quality gates. All three are enforced after the reports are flushed. -->
+    <minMutationScore>80.0</minMutationScore>   <!-- 0.0 = score gate off -->
+    <maxErroredCount>0</maxErroredCount>        <!-- negative = disabled -->
+    <maxNotAppliedRatio>0.20</maxNotAppliedRatio> <!-- negative = disabled -->
+
+    <!-- Comma-separated on the CLI; one element per <targetModules> here -->
+    <targetModules>com.example.pipeline.transforms</targetModules>
+    <targetModules>com.example.pipelinesupport</targetModules>
+
+    <!-- Operator types to skip: JOIN, FILTER, AGGREGATE, WINDOW, PROJECT, OTHER -->
+    <excludedMutators>WINDOW</excludedMutators>
+    <excludedMutators>OTHER</excludedMutators>
+
+    <!-- Multi-module reactors: fail via MojoFailureException (Maven exit 1,
+         honors the fail-at-end flag) instead of terminating the JVM with exit code 2 -->
+    <exitProcessOnGateFailure>true</exitProcessOnGateFailure>
+
+    <!-- Inject Spark's mandatory --add-opens set into Surefire argLine -->
+    <injectAddOpens>true</injectAddOpens>
+  </configuration>
+</plugin>
+```
 
 **In-process gate** (JUnit 5 path):
 
@@ -137,11 +232,68 @@ declaration):
 | `spark.mutator.minMutationScore` | unset | score floor; unset = gate off |
 | `spark.mutator.enabled` / `spark.mutator.disabled` | — | force the extension on/off |
 
+These are **test-JVM system properties** — `SparkMutatorExtension` reads them
+with `System.getProperty` inside the fork that runs your tests. A `-D` on the
+`mvn` command line stays in the Maven JVM and never reaches that fork (§3.3),
+so set them on one of these surfaces:
+
+Maven — Surefire `systemPropertyVariables` (or the equivalent `<argLine>-D…`):
+
+```xml
+<plugin>
+  <artifactId>maven-surefire-plugin</artifactId>
+  <configuration>
+    <systemPropertyVariables>
+      <spark.mutator.minMutationScore>80</spark.mutator.minMutationScore>
+      <!-- optional: turn the extension off for a plain baseline run -->
+      <!-- <spark.mutator.disabled>true</spark.mutator.disabled> -->
+    </systemPropertyVariables>
+  </configuration>
+</plugin>
+```
+
+Gradle — the `test` task:
+
+```groovy
+test {
+    systemProperty 'spark.mutator.minMutationScore', '80'
+    // systemProperty 'spark.mutator.disabled', 'true'   // plain baseline run
+}
+```
+
+IDE — add `-Dspark.mutator.minMutationScore=80` to the run configuration's VM
+options.
+
 **Spark extension** (always required for interception):
 
 | Property | Value |
 |---|---|
 | `spark.sql.extensions` | `io.github.wpunit13.mutator.MutatorSparkExtension` |
+
+Two equivalent surfaces — pick one:
+
+1. **Session builder config** (canonical; what the examples do):
+
+```java
+SparkSession.builder()
+    .master("local[1]")
+    .config("spark.sql.extensions", "io.github.wpunit13.mutator.MutatorSparkExtension")
+    .getOrCreate();
+```
+
+2. **System property** (Spark seeds `SparkConf` from `spark.*` system
+   properties) — same surfaces as the gate above:
+   `-Dspark.sql.extensions=io.github.wpunit13.mutator.MutatorSparkExtension` in
+   Surefire `systemPropertyVariables`, Gradle `systemProperty`, or IDE VM
+   options.
+
+`@EnableSparkMutationTesting` self-heals either way: `beforeAll` sets the
+system property if it is missing, and appends the class if a different
+extension is already configured. Declare it explicitly anyway — it keeps the
+session config truthful for runs that bypass the annotation. One caveat: the
+self-heal runs in `beforeAll`, so create the session in the suite body or
+`@BeforeAll` — a session built in a static initializer is created before the
+extension can act.
 
 **Naming convention.** User-configurable `spark.mutator.*` keys are camelCase
 (`outputDirectory`, `timeoutMultiplier`, `minMutationScore`) and use **one key
@@ -184,25 +336,62 @@ The mutation score is:
 
 Errored and skipped mutants are excluded from both numerator and denominator.
 
-Both paths enforce the same floor, but through different channels:
+Both paths enforce the same floors, but through different channels:
 
-- **Maven plugin:** `MutateMojo` throws `MojoFailureException` when
-  `minMutationScore > 0.0 && score < minMutationScore` ⇒ Maven build fails.
+- **Maven plugin:** `MutateMojo` logs the failure and terminates the Maven JVM
+  with exit code 2 when any gate is breached (see the exit-code note below).
 - **In-process:** `SparkMutatorExtension.afterAll` throws
-  `IllegalStateException` when `spark.mutator.minMutationScore` is set and
-  `score < min` ⇒ JUnit container fails ⇒ Surefire exits non-zero.
+  `IllegalStateException` ⇒ JUnit container fails ⇒ Surefire exits non-zero.
+
+Three gates, in enforcement order (all after the reports are flushed, so the
+artifacts always survive a failure):
+
+1. **WP-24 real-failure ERRORED (zero tolerance).**
+   `spark.mutator.maxErroredCount` (default `0`): a real-failure ERRORED — a
+   dead session, a shim violation, or a mutation crashing the pipeline — means
+   the harness or engine misbehaved. `errored > maxErroredCount` fails the
+   gate; negative disables.
+2. **WP-24 designed not-applied (ratio).**
+   `spark.mutator.maxNotAppliedRatio` (default `0.20`): the designed
+   not-applied population (nodes hidden inside caches, pruned stubs, shapes
+   that never execute) is shape-dependent and legitimate in bounded quantities
+   — `notApplied / (totalMutants − skipped) > maxNotAppliedRatio` fails the
+   gate; negative disables.
+3. **Score floor (opt-in).** `spark.mutator.minMutationScore` (default `0.0`
+   = off): `score < minScore` fails the gate.
+
+The WP-24 split exists because the score formula cannot see either ERRORED
+population (both are excluded from numerator and denominator) — the incident
+that motivated it printed `mutationScore: 100.0` while 22 of 24 mutants never
+executed.
 
 Semantics in both cases are **opt-in**: `0.0` / unset means "report only, never
 fail". The in-process path writes the report *before* throwing, so a failing
 gate still leaves a CI artifact explaining the shortfall.
 
 The score is computed once in
-`mutator-core/.../report/ReportWriter.computeScore(...)`; the in-process path
-reaches it via `ReportSink.computeMutationScore()`.
+`mutator-core/.../report/ReportWriter.computeScore(...)` in both modes; the
+in-process path reaches it via `ReportSink.computeMutationScore()`.
 
-> **Exit-code note:** both paths currently fail with a generic non-zero exit
-> code (effectively `1`). A *specific* exit code `2` (as `core_idea.md` §8
-> hypothesizes) is deferred to the governance/quality-gates packet.
+> **Exit codes (WP-19):** the Maven plugin path terminates the Maven JVM with
+> the dedicated governance-gate exit code **2** when the gate fails — the
+> reports are already flushed to disk, so CI can distinguish "gate failed (2)"
+> from Maven's generic "build failed (1)". Tradeoff: the exit deliberately
+> kills the Maven JVM, so in a multi-module reactor the remaining modules do
+> not build (see `MutateMojo`'s javadoc). The pytest plugin path exits **2**
+> the same way, with the report finalized first. The JUnit 5 in-process path
+> CANNOT control Surefire's process exit code and stays a generic non-zero
+> failure — a known limitation, deliberately not faked.
+>
+> **Multi-module reactors:** set
+> `-Dspark.mutator.exitProcessOnGateFailure=false` to deliver the gate failure
+> as a `MojoFailureException` instead — Maven still fails (exit code 1), but
+> the reactor honors `--fail-at-end` / `--fail-never`, so the remaining
+> modules build and every module's gate verdict is collected. The dedicated
+> exit code 2 is lost in this mode; route CI on the report artifact or the
+> Maven exit code. Alternatively, invoke the goal per module
+> (`mvn -pl <module> test-compile spark-mutation-testing:mutate`) so the JVM
+> termination only ever affects one module.
 
 ---
 
@@ -212,7 +401,7 @@ Written to the report directory (see §3.2):
 
 | File | Notes |
 |---|---|
-| `mutation-report.json` | schema v1 (`docs/CONTRACTS.md` §5.3) |
+| `mutation-report.json` | schema v2 (`docs/CONTRACTS.md` §5.3; v2 adds the WP-24 `NOT_APPLIED` split) |
 | `mutation-report.sarif` | SARIF 2.1.0; `SURVIVED` = `warning`, `ERRORED` = `error`, `KILLED`/`TIMED_OUT` omitted |
 | `mutation-report.html` | self-contained (inline CSS, no external assets) |
 
@@ -225,7 +414,7 @@ modes.
 
 ## 6. Adding a Spark/Scala shim
 
-Adding a new `(major.minor × scalaBinary)` cell is a separate, frozen runbook:
+Adding a new `(major.minor × scalaBinary)` combination is a separate, frozen runbook:
 [`VERSION_ADDITION_SOP.md`](VERSION_ADDITION_SOP.md). In short: create a new
 `interceptor-spark-<ver>_<scala>` module, prove compatibility *by compiling*,
 add the golden cross-version test, register the module, and add the bundle +
@@ -257,6 +446,12 @@ custom runner) implements the same contract against public `mutator-core` APIs:
 test enables test-impact mapping (`mappedTestIds`), which the coordinator uses
 as the per-mutant `-Dtest=` filter.
 
+> **WP-26 (planned):** these three obligations are scheduled to move into
+> `MutatorSparkExtension` itself (config-activated, shutdown-hook handoff),
+> which makes the Maven plugin path pom-only — no harness glue, no annotation.
+> Until then, any JUnit 5 suite gets them for free via
+> `@EnableSparkMutationTesting`; other frameworks implement them per §7.
+
 Failing loudly is part of the contract. A harness that swallows an unknown-
 mutant error or skips the marker turns a broken handoff into "every mutant
 survived" — the single worst failure mode this tool can produce. When in doubt,
@@ -271,6 +466,9 @@ writes `catalog.json` and applied markers.
 ---
 
 ## Current status
+---
+
+## Current status
 
 Working end-to-end: PySpark (pytest plugin), the Spark 3.5.x / Scala 2.12 + 2.13
 shims with Join / Filter / Aggregate / Window / Null-Coalesce / Project mutators,
@@ -279,4 +477,7 @@ The ScalaTest bridge is specified as WP-18 (`mutator-scalatest`) but deferred:
 its planned discovery runner (`org.scalatest.junit.JUnitRunner`) does not exist
 in the managed ScalaTest 3.2.18 — status, evidence, and the resume plan live in
 [`SCALA_PIPELINES.md`](SCALA_PIPELINES.md). WP-17 tightens discovery to a
-single plan shape and adds the applied-mutation honesty guard.
+single plan shape and adds the applied-mutation honesty guard. WP-25 (in-process
+per-mutant watchdog), WP-26 (zero-touch fork path, pitest parity), and WP-27
+(`Decimal → Double` type-downgrade mutator) are designed-but-unimplemented
+future work.

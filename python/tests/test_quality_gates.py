@@ -49,7 +49,14 @@ class FakeBridge:
         return list(self.mapped_tests.get(mutant_id, []))
 
     def set_active_mutant(self, mutant_id):
-        pass
+        # Simulate the engine's happy path: the Catalyst rule applied the
+        # mutation, so the tracker records the active mutant (WP-24
+        # NOT_APPLIED detection reads this; tests override to simulate
+        # drift).
+        self.applied_mutant = mutant_id
+
+    def get_applied_mutant_or_none(self):
+        return self.applied_mutant
 
     def clear_active_mutant(self, mutant_id):
         pass
@@ -219,6 +226,61 @@ def test_quality_gate_passes_when_threshold_is_zero(
     config_path = _write_config(pytester, "min_mutation_score = 0.0\n")
     mutator_fakes.bridge.catalog = [_entry(MUTANT_A, "JOIN", 0)]
     mutator_fakes.bridge.mapped_tests = {MUTANT_A: ["test_app.py::test_alpha"]}
+    result = _run_nested(
+        pytester,
+        monkeypatch,
+        "--spark-mutate",
+        "--spark-mutate-config",
+        str(config_path),
+    )
+    assert result.ret == 0
+
+
+def test_not_applied_mutant_is_classified_and_ratio_gate_fires(
+    pytester, mutator_fakes, monkeypatch
+):
+    # WP-24: when the engine's applied tracker holds nothing for the active
+    # mutant, the classification is NOT_APPLIED (never a fake SURVIVED), and
+    # the not-applied ratio gate (1/1 = 1.0 > 0.2) fires with exit code 2.
+    pytester.makepyfile(test_app="def test_alpha():\n    assert True\n")
+    config_path = _write_config(
+        pytester, "min_mutation_score = 0.0\nmax_not_applied_ratio = 0.2\n"
+    )
+    mutator_fakes.bridge.catalog = [_entry(MUTANT_A, "JOIN", 0)]
+    mutator_fakes.bridge.mapped_tests = {MUTANT_A: ["test_app.py::test_alpha"]}
+    # Simulate drift: the Catalyst rule never recorded the rewrite. Patch the
+    # tracker read (not the attribute) so set_active_mutant's bookkeeping
+    # can't resurrect the applied fact mid-run.
+    monkeypatch.setattr(
+        mutator_fakes.bridge, "get_applied_mutant_or_none", lambda: None
+    )
+    result = _run_nested(
+        pytester,
+        monkeypatch,
+        "--spark-mutate",
+        "--spark-mutate-config",
+        str(config_path),
+    )
+    assert result.ret == 2
+    output = _combined_output(result)
+    assert "not-applied ratio" in output
+    assert "max_not_applied_ratio" in output
+
+
+def test_not_applied_gate_disabled_by_negative_ratio(
+    pytester, mutator_fakes, monkeypatch
+):
+    # Same drift, but max_not_applied_ratio = -1 disables the check: the run
+    # must pass (exit 0) despite the not-applied mutant.
+    pytester.makepyfile(test_app="def test_alpha():\n    assert True\n")
+    config_path = _write_config(
+        pytester, "min_mutation_score = 0.0\nmax_not_applied_ratio = -1.0\n"
+    )
+    mutator_fakes.bridge.catalog = [_entry(MUTANT_A, "JOIN", 0)]
+    mutator_fakes.bridge.mapped_tests = {MUTANT_A: ["test_app.py::test_alpha"]}
+    monkeypatch.setattr(
+        mutator_fakes.bridge, "get_applied_mutant_or_none", lambda: None
+    )
     result = _run_nested(
         pytester,
         monkeypatch,

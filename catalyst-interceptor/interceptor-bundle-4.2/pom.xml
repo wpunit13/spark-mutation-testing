@@ -1,0 +1,189 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>io.github.wpunit13</groupId>
+    <artifactId>spark-mutation-testing-parent</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+    <relativePath>../../pom.xml</relativePath>
+  </parent>
+
+  <artifactId>interceptor-bundle-spark-4.2_2.13</artifactId>
+  <packaging>jar</packaging>
+
+  <name>interceptor-bundle-spark-4.2_2.13</name>
+  <description>
+    Produces the self-contained fat jar that the Python wheel mounts via --jars,
+    for Spark 4.2.x / Scala 2.13 (WP-20).
+
+    WHY THIS BUNDLE RECOMPILES THE VERSION-AGNOSTIC LAYERS
+    ------------------------------------------------------
+    The 3.5 bundles ship api/dispatch/runtime classes compiled against Spark
+    3.5.3. Those classes are SOURCE-identical here, but a Spark 4.2 driver
+    cannot link against classes whose erased Catalyst descriptors were built
+    for 3.5 when the 4.2 Catalyst signatures differ. This module therefore
+    recompiles interceptor-api, interceptor-dispatch and interceptor-runtime
+    FROM SOURCE (build-helper add-source) against THIS combination's Spark
+    4.2.0 / Scala 2.13.18, exactly as the WP-20 spike proved possible, and
+    pairs them with the 4.2-compiled shim. mutator-core is pure Java (no Spark
+    imports, enforced by the CI gate) and is consumed as the reactor artifact.
+
+    NO PACKAGE RELOCATION
+    ---------------------
+    Same rationale as the other bundles: relocation would rename the
+    PlanMutatorShim interface named in spark.sql.extensions and break the
+    ServiceLoader contract. The plugin mounts exactly one bundle per session.
+
+    Verify after building:
+      jar tf target/interceptor-spark-4.2_2.13.jar | grep -E \
+        "MutatorSparkExtension|MutantRegistry|ShimImpl|META-INF/services"
+    All four must be present, and the services file must be named
+      META-INF/services/io.github.wpunit13.mutator.api.PlanMutatorShim
+    containing the UNRELOCATED implementation class name
+    (io.github.wpunit13.mutator.spark42_213.ShimImpl).
+  </description>
+
+  <properties>
+    <!-- Module-local pin for the 4.2 combination, mirroring interceptor-spark-4.2_2.13. -->
+    <spark.version>4.2.0</spark.version>
+    <scala.version>2.13.18</scala.version>
+    <scala.binary.version>2.13</scala.binary.version>
+  </properties>
+
+  <dependencies>
+    <!--
+      The 4.2 shim (brings ShimImpl + its META-INF/services entry) and the
+      pure-Java core. The version-agnostic Scala layers are NOT taken as
+      artifacts: they are recompiled from source below against Spark 4.2.
+    -->
+    <dependency>
+      <groupId>io.github.wpunit13</groupId>
+      <artifactId>spark-mutation-testing-core</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.github.wpunit13</groupId>
+      <artifactId>interceptor-spark-4.2_2.13</artifactId>
+    </dependency>
+
+    <!--
+      Compile-time-only logging API for the recompiled runtime layer (provided:
+      the Spark 4.2 driver supplies slf4j-api and its binding at runtime).
+    -->
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-api</artifactId>
+      <scope>provided</scope>
+    </dependency>
+
+    <dependency>
+      <groupId>org.apache.spark</groupId>
+      <artifactId>spark-sql_${scala.binary.version}</artifactId>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.scala-lang</groupId>
+      <artifactId>scala-library</artifactId>
+      <scope>provided</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <finalName>interceptor-spark-4.2_2.13</finalName>
+
+    <plugins>
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>build-helper-maven-plugin</artifactId>
+        <version>3.5.0</version>
+        <executions>
+          <execution>
+            <id>add-version-agnostic-sources</id>
+            <phase>generate-sources</phase>
+            <goals>
+              <goal>add-source</goal>
+            </goals>
+            <configuration>
+              <sources>
+                <!-- Recompiled against THIS combination's Spark 4.2.0 (see description). -->
+                <source>${project.basedir}/../interceptor-api/src/main/scala</source>
+                <source>${project.basedir}/../interceptor-dispatch/src/main/scala</source>
+                <source>${project.basedir}/../interceptor-runtime/src/main/scala</source>
+              </sources>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>net.alchim31.maven</groupId>
+        <artifactId>scala-maven-plugin</artifactId>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-shade-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>shade-bundle</id>
+            <phase>package</phase>
+            <goals>
+              <goal>shade</goal>
+            </goals>
+            <configuration>
+              <createDependencyReducedPom>true</createDependencyReducedPom>
+
+              <!--
+                MUST stay false. Minimisation removes classes with no static
+                reference, which is exactly how ShimImpl is loaded (reflectively,
+                via ServiceLoader) and how MutatorSparkExtension is loaded
+                (reflectively, by Spark from the spark.sql.extensions string).
+                Enabling this strips both and breaks the tool at runtime.
+              -->
+              <minimizeJar>false</minimizeJar>
+
+              <!--
+                Merges META-INF/services entries from all bundled artifacts.
+                Only the shim jar carries a PlanMutatorShim services file here,
+                so the merged file names exactly one implementation.
+              -->
+              <transformers>
+                <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+              </transformers>
+
+              <artifactSet>
+                <excludes>
+                  <exclude>org.apache.spark:*</exclude>
+                  <exclude>org.apache.hadoop:*</exclude>
+                  <exclude>org.scala-lang:*</exclude>
+                  <exclude>org.scala-lang.modules:*</exclude>
+                </excludes>
+              </artifactSet>
+
+              <filters>
+                <filter>
+                  <artifact>*:*</artifact>
+                  <excludes>
+                    <exclude>META-INF/*.SF</exclude>
+                    <exclude>META-INF/*.DSA</exclude>
+                    <exclude>META-INF/*.RSA</exclude>
+                    <exclude>META-INF/MANIFEST.MF</exclude>
+                    <exclude>module-info.class</exclude>
+                  </excludes>
+                </filter>
+              </filters>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <configuration>
+          <skipTests>true</skipTests>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+</project>

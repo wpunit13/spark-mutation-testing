@@ -45,6 +45,13 @@
     <junit.version>5.10.2</junit.version>
     <scalatest.version>3.2.18</scalatest.version>
 
+    <!--
+      Pinned to the exact slf4j that Spark ${spark.version} ships with, so the
+      interceptor's log calls bind to the driver's existing slf4j/log4j2
+      runtime instead of introducing a second API on the classpath.
+    -->
+    <slf4j.version>2.0.7</slf4j.version>
+
     <maven.plugin.tools.version>3.13.1</maven.plugin.tools.version>
     <maven.api.version>3.9.6</maven.api.version>
 
@@ -94,6 +101,26 @@
         <groupId>io.github.wpunit13</groupId>
         <artifactId>interceptor-spark-3.5_2.13</artifactId>
         <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>io.github.wpunit13</groupId>
+        <artifactId>interceptor-spark-3.5_2.12</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>io.github.wpunit13</groupId>
+        <artifactId>interceptor-spark-4.2_2.13</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+
+      <!--
+        Compile-time-only logging API for the interceptor (always provided —
+        the runtime binding comes from Spark's own classpath, never from us).
+      -->
+      <dependency>
+        <groupId>org.slf4j</groupId>
+        <artifactId>slf4j-api</artifactId>
+        <version>${slf4j.version}</version>
       </dependency>
 
       <dependency>

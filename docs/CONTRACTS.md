@@ -168,8 +168,8 @@ import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 
 trait PlanMutatorShim {
 
-  /** Identifies the exact Spark + Scala binary version cell this shim targets,
-    * e.g. SparkShimVersion("3.5", "2.13"). Used for diagnostic logging only —
+  /** Identifies the exact Spark/Scala combination this shim targets,
+    * e.g. SparkShimVersion("3.5", "2.13"). Used for diagnostic logging only. */
     * runtime selection itself happens one layer up, in interceptor-dispatch. */
   def supportedVersion: SparkShimVersion
 
@@ -221,7 +221,7 @@ trait PlanMutatorShim {
   def canonicalExprSig(node: LogicalPlan, operatorType: OperatorType): String
 }
 
-/** Immutable value identifying a shim's target Spark/Scala binary cell. */
+/** Immutable value identifying a shim's target Spark/Scala combination. */
 final case class SparkShimVersion(sparkMinor: String, scalaBinary: String)
 ```
 
@@ -381,6 +381,19 @@ public final class MutationCatalogAccess {
      * @throws IllegalArgumentException if mutantId is not present in the catalog.
      */
     public static String getMappedTestIdsJson(String mutantId);
+
+    /**
+     * Replaces the entry's astDiffSnippet (WP-19 plan-diff capture). Called by the
+     * Catalyst rule immediately after a rewrite is applied; the snippet is pure
+     * observation and never alters the plan, the coordinate space, or the
+     * applied-mutation record. In-process paths (JUnit 5 standalone, the PySpark
+     * driver) reach the final report through this catalog; externally-orchestrated
+     * mutant forks additionally persist the snippet as a diffs/<mutantId>.json
+     * sidecar (see DiffSnippetStore) for the aggregating coordinator.
+     *
+     * @throws IllegalArgumentException if mutantId is not present in the catalog.
+     */
+    public static void recordAstDiffSnippet(String mutantId, String astDiffSnippet);
 }
 
 package io.github.wpunit13.mutator.report;
@@ -473,7 +486,7 @@ public final class MutantResult {
     // Immutable; constructed exactly once by ReportSink.recordOutcome.
 }
 
-public enum MutantStatus { KILLED, SURVIVED, TIMED_OUT, ERRORED, SKIPPED }
+public enum MutantStatus { KILLED, SURVIVED, TIMED_OUT, ERRORED, NOT_APPLIED, SKIPPED }
 ```
 
 `SKIPPED` is included in the POJO enum (used by the pre-flight cardinality
@@ -482,12 +495,21 @@ classification does not enumerate it; `SKIPPED` mutants are explicitly
 excluded from the Mutation Score denominator (§5.4) to keep the score formula
 exactly as specified.
 
+`NOT_APPLIED` (WP-24, schema v2) marks a mutant whose rewrite never executed:
+the node was hidden inside an `InMemoryRelation` at execution, pruned to a
+stub, or its catalogued shape never ran. It is distinct from `ERRORED` (a
+harness/engine failure: dead session, shim violation, mutation crash) so the
+governance gate can zero-tolerance real failures without punishing
+shape-dependent not-applied mutants. `NOT_APPLIED` is excluded from the
+Mutation Score denominator and governed by
+`spark.mutator.maxNotAppliedRatio` instead.
+
 ### 5.3 JSON Schema — `mutation-report.json`
 
 ```json
 {
-  "$schema": "https://spark-mutator.wpunit13.io/schema/mutation-report/v1.json",
-  "schemaVersion": 1,
+  "$schema": "https://spark-mutator.wpunit13.io/schema/mutation-report/v2.json",
+  "schemaVersion": 2,
   "generatedAtEpochMillis": 1732000000000,
   "config": {
     "targetModules": ["my_pipeline.transforms"],
@@ -501,6 +523,7 @@ exactly as specified.
     "survived": 0,
     "timedOut": 0,
     "errored": 0,
+    "notApplied": 0,
     "skipped": 0,
     "mutationScore": 0.0
   },
@@ -528,6 +551,15 @@ exactly as specified.
 
 **Field-level contract notes:**
 
+- `astDiffSnippet` is populated by the engine at rewrite time (WP-19): the
+  Catalyst rule captures the matched node's before/after plan strings as a
+  single-line `"<before> => <after>"` fragment (each side truncated to 2000
+  chars, newlines flattened to `" | "`). In-process paths record it through
+  `MutationCatalogAccess.recordAstDiffSnippet`; externally-orchestrated mutant
+  forks persist it as a sidecar file `<outputDir>/diffs/<mutantId>.json`
+  (`{"mutantId": ..., "astDiffSnippet": ...}`, written by `DiffSnippetStore`)
+  which the coordinator merges before writing reports. The sidecar is NOT a
+  field in this schema; a missing sidecar legally leaves the field `""`.
 - `mutants[].result` is nullable **only** transiently during report
   generation if the process crashed mid-run without recording an outcome;
   `finalizeAndWriteReports()` MUST classify any such mutant as `ERRORED`

@@ -26,7 +26,7 @@
     Spark and Scala versions are inherited from the root pom for now, since
     exactly one shim exists. When a SECOND shim is added, override
     spark.version, scala.version and scala.binary.version as module-local
-    properties in each shim, so the cells are independently pinned.
+    properties in each shim, so the combinations are independently pinned.
 
     NOTE: this module produces a THIN jar (its own classes only). The fat jar
     that the Python wheel mounts is produced by interceptor-bundle, which

@@ -7,8 +7,10 @@ import io.github.wpunit13.mutator.MutantBootstrap;
 import io.github.wpunit13.mutator.MutantRegistry;
 import io.github.wpunit13.mutator.catalog.MutationCatalogAccess;
 import io.github.wpunit13.mutator.catalog.MutationCatalogIo;
+import io.github.wpunit13.mutator.model.MutantStatus;
 import io.github.wpunit13.mutator.report.AppliedMarkerStore;
 import io.github.wpunit13.mutator.report.ReportSink;
+import io.github.wpunit13.mutator.report.ReportWriter;
 import io.github.wpunit13.mutator.reset.SessionResetFacade;
 
 import java.io.IOException;
@@ -20,7 +22,9 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.AfterAllCallback;
@@ -255,6 +259,24 @@ public class SparkMutatorExtension implements
 
         ReportSink.finalizeAndWriteReports();
 
+        // WP-24 governance gate: real-failure ERRORED is zero-tolerance (a
+        // dead session or shim violation means the harness/engine is broken);
+        // the designed not-applied population is ratio-gated. Runs after the
+        // report is written so the artifact survives the failure.
+        List<String> populationViolations = ReportWriter.evaluateGateViolations(
+                MutationCatalogAccess.allEntries().size(),
+                ReportSink.countByStatus(MutantStatus.ERRORED),
+                ReportSink.countByStatus(MutantStatus.NOT_APPLIED),
+                ReportSink.countByStatus(MutantStatus.SKIPPED),
+                intProperty(MutantBootstrap.PROP_MAX_ERRORED_COUNT,
+                        ReportWriter.DEFAULT_MAX_ERRORED_COUNT),
+                doubleProperty(MutantBootstrap.PROP_MAX_NOT_APPLIED_RATIO,
+                        ReportWriter.DEFAULT_MAX_NOT_APPLIED_RATIO));
+        if (!populationViolations.isEmpty()) {
+            throw new IllegalStateException(
+                    "WP-24 governance gate failed: " + String.join("; ", populationViolations));
+        }
+
         // Optional in-process quality gate. Only enforced when the caller
         // explicitly sets a minimum (via surefire systemPropertyVariables or
         // argLine); unset means off, preserving non-blocking IDE / plain
@@ -268,6 +290,30 @@ public class SparkMutatorExtension implements
                 throw new IllegalStateException(
                         "Mutation score " + score + "% is below minimum " + minScore + "%.");
             }
+        }
+    }
+
+    private static int intProperty(String key, int fallback) {
+        String value = System.getProperty(key);
+        if (value == null || value.isBlank()) {
+            return fallback;
+        }
+        try {
+            return Integer.parseInt(value.trim());
+        } catch (NumberFormatException e) {
+            return fallback;
+        }
+    }
+
+    private static double doubleProperty(String key, double fallback) {
+        String value = System.getProperty(key);
+        if (value == null || value.isBlank()) {
+            return fallback;
+        }
+        try {
+            return Double.parseDouble(value.trim());
+        } catch (NumberFormatException e) {
+            return fallback;
         }
     }
 
@@ -393,7 +439,10 @@ public class SparkMutatorExtension implements
         } else if (errored) {
             recordOutcomeQuietly(mutantId, STATUS_ERRORED, elapsed, failureDetail);
         } else if (!mutationApplied) {
-            recordOutcomeQuietly(mutantId, STATUS_ERRORED, elapsed,
+            // WP-24: the rewrite never executed (node hidden inside a cache,
+            // pruned stub, shape that never ran). Designed and shape-dependent
+            // — distinct from a harness/engine failure.
+            recordOutcomeQuietly(mutantId, "NOT_APPLIED", elapsed,
                     "mutation was not applied (coordinate matched no plan node)");
         } else {
             recordOutcomeQuietly(mutantId, "SURVIVED", elapsed, null);
@@ -405,26 +454,52 @@ public class SparkMutatorExtension implements
         ctor.setAccessible(true);
         Object testInstance = ctor.newInstance();
 
+        List<Method> beforeAllMethods = findMethodsWithAnnotation(testClass, BeforeAll.class);
+        List<Method> afterAllMethods = findMethodsWithAnnotation(testClass, AfterAll.class);
         List<Method> beforeMethods = findMethodsWithAnnotation(testClass, BeforeEach.class);
         List<Method> afterMethods = findMethodsWithAnnotation(testClass, AfterEach.class);
         List<Method> testMethods = findTestMethods(testClass, mappedTestNames);
 
-        for (Method testMethod : testMethods) {
-            try {
-                for (Method before : beforeMethods) {
-                    before.setAccessible(true);
-                    before.invoke(testInstance);
-                }
-                testMethod.setAccessible(true);
-                testMethod.invoke(testInstance);
-            } finally {
-                for (Method after : afterMethods) {
-                    try {
-                        after.setAccessible(true);
-                        after.invoke(testInstance);
-                    } catch (Throwable ignored) {
-                        // AfterEach cleanup must never mask the test method's own outcome
+        // Re-run the FULL class lifecycle, not just the per-test one. The
+        // outer run's @AfterAll has typically already torn down whatever
+        // @BeforeAll built (e.g. spark.stop()), so a re-run that skipped
+        // @BeforeAll would execute every mutant against that dead session and
+        // classify them all ERRORED. Re-invoking @BeforeAll/@AfterAll per
+        // mutant mirrors the fork-per-mutant path, where each mutant gets a
+        // fresh JVM: SparkSession.builder().getOrCreate() sees the stopped
+        // context and builds a fresh one (SparkSession checks isStopped on the
+        // cached sessions; SparkContext.stop() cleared the active context).
+        for (Method beforeAll : beforeAllMethods) {
+            beforeAll.setAccessible(true);
+            beforeAll.invoke(testInstance);
+        }
+        try {
+            for (Method testMethod : testMethods) {
+                try {
+                    for (Method before : beforeMethods) {
+                        before.setAccessible(true);
+                        before.invoke(testInstance);
                     }
+                    testMethod.setAccessible(true);
+                    testMethod.invoke(testInstance);
+                } finally {
+                    for (Method after : afterMethods) {
+                        try {
+                            after.setAccessible(true);
+                            after.invoke(testInstance);
+                        } catch (Throwable ignored) {
+                            // AfterEach cleanup must never mask the test method's own outcome
+                        }
+                    }
+                }
+            }
+        } finally {
+            for (Method afterAll : afterAllMethods) {
+                try {
+                    afterAll.setAccessible(true);
+                    afterAll.invoke(testInstance);
+                } catch (Throwable ignored) {
+                    // AfterAll cleanup must never mask the test methods' own outcome
                 }
             }
         }

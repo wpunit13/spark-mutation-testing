@@ -20,10 +20,10 @@
 
     This is the ONLY module permitted to import concrete Catalyst case classes
     (Join, Filter, Aggregate, Window, Project) and pattern-match on them for the
-    Spark 3.5 / Scala 2.12 cell.
+    Spark 3.5 / Scala 2.12 combination.
 
     Spark and Scala versions are overridden here as module-local properties so
-    the 2.12 cell is pinned independently from the reactor default (Scala 2.13).
+    the 2.12 combination is pinned independently from the reactor default (Scala 2.13).
   </description>
 
   <properties>

@@ -13,14 +13,14 @@ import org.apache.spark.sql.types.BooleanType
 
 /**
  * Version-agnostic mutation logic shared by the Spark 3.5.x / Scala 2.12 and
- * 2.13 shims. Every mutation rule lives here so the two Scala-binary cells
+ * 2.13 shims. Every mutation rule lives here so the two Scala-binary shims
  * cannot drift. The concrete `ShimImpl` in each `interceptor-spark-3.5_*`
  * module supplies only [[supportedVersion]].
  *
  * This source is compiled into each Scala-binary shim (via
  * build-helper-maven-plugin add-source), never shipped as its own artifact,
  * because it references `spark-catalyst_${scala.binary.version}` which differs
- * per cell.
+ * per combination.
  */
 abstract class Spark35ShimBase extends PlanMutatorShim {
 

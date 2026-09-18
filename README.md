@@ -5,7 +5,7 @@
   </p>
   <p align="center">
     <img src="https://img.shields.io/badge/Python-3.9%2B-3776AB" alt="Python 3.9+">
-    <img src="https://img.shields.io/badge/Spark-3.5.x-E25A1C" alt="Spark 3.5.x">
+    <img src="https://img.shields.io/badge/Spark-3.5.x%20%7C%204.2.x-E25A1C" alt="Spark 3.5.x | 4.2.x">
     <img src="https://img.shields.io/badge/Scala-2.13-DC322F" alt="Scala 2.13">
     <img src="https://img.shields.io/badge/status-active%20development-brightgreen" alt="Status">
   </p>
@@ -72,6 +72,83 @@ min_mutation_score = 80.0                       # CI gate
 
 ---
 
+## Quick start — Java / Scala (Maven, JUnit 5)
+
+Two test-scoped dependencies and one annotation. Existing tests stay untouched:
+
+```xml
+<dependency>
+  <groupId>io.github.wpunit13</groupId>
+  <artifactId>mutator-junit5</artifactId>
+  <version>1.0.0-SNAPSHOT</version>
+  <scope>test</scope>
+</dependency>
+<dependency>
+  <groupId>io.github.wpunit13</groupId>
+  <artifactId>interceptor-bundle-spark-3.5_2.13</artifactId> <!-- match your Spark/Scala line -->
+  <version>1.0.0-SNAPSHOT</version>
+  <scope>test</scope>
+</dependency>
+```
+
+```java
+import io.github.wpunit13.mutator.junit5.EnableSparkMutationTesting;
+
+@EnableSparkMutationTesting
+class MyPipelineTest { /* existing tests unchanged */ }
+```
+
+**Where to put the annotation** — not on every class:
+
+- **Shared base class (recommended).** The annotation is `@Inherited` — put it
+  on your `AbstractSparkTest` once and every subclass is covered.
+- **No base class?** Annotate each Spark-touching test class — one line each,
+  mechanical. Non-Spark classes need nothing. (WP-26, planned, removes the
+  requirement entirely for the Maven plugin path.)
+- **Maven plugin path (`mutate`, CI).** At least one annotated class must
+  execute in each run: the extension is the fork-side bridge that hands
+  `catalog.json` and the applied markers back to the Mojo. **Zero annotated
+  classes ⇒ a silent empty report** (zero mutants, score 0.0%, build green).
+  Several annotated classes are fine — the bridge writes are safe to repeat.
+- **In-process standalone (`mvn test`).** The annotated class *drives the
+  loop* (its `afterAll` re-runs the suite per mutant and writes the report).
+  Run **one annotated class per run** — select it with Surefire
+  `<includes>`/a profile (the example's `-Pweak`/`-Phardened` do exactly
+  this). Multiple annotated classes in one run each trigger their own loop;
+  that configuration is untested.
+- **Auto-detection.** Not shipped — `mutator-junit5` registers no
+  `ServiceLoader` entry. A hand-rolled
+  `META-INF/services/org.junit.jupiter.api.extension.Extension` +
+  `junit.jupiter.extensions.autodetection.enabled=true` works for the Maven
+  plugin path (fork mode tolerates every class carrying the extension) but
+  must not be combined with standalone mode, where every registered class
+  would trigger its own mutation loop.
+
+Then either:
+
+```bash
+mvn test                                        # in-process loop (no plugin needed)
+mvn test-compile spark-mutation-testing:mutate  # fork-per-mutant loop (CI-grade)
+```
+
+> The plugin goal injects the mandatory Java 17+ JVM opens into Surefire for
+> you. The in-process `mvn test` path runs in *your* Surefire fork, so there
+> you add them yourself (once, in your Surefire `argLine`) — see
+> [`docs/developer-guide.md`](docs/developer-guide.md) §1.2.
+
+The Maven plugin auto-detects your Spark/Scala versions, resolves the matching
+interceptor, and injects the Spark extension **plus the mandatory Java 17+ JVM
+opens** into Surefire — no manual Surefire wiring. Reports land in
+`target/spark-mutator-reports/` (`json` + `sarif` + `html`).
+
+- Full guide: [`docs/developer-guide.md`](docs/developer-guide.md)
+- Runnable proof: [`examples/spark-java-pipeline/`](examples/spark-java-pipeline/)
+  (weak suite ⇒ mutants survive; hardened suite ⇒ mutants killed)
+- Supported today: Spark 3.5.x (Scala 2.12/2.13) and 4.2.x (Scala 2.13), JUnit 5
+  (Java or JUnit 5-in-Scala). ScalaTest bridge is planned (WP-18).
+
+---
+
 ## How it works
 
 ```mermaid
@@ -131,11 +208,13 @@ the whole point.** See `examples/pyspark-pipeline/` for a runnable proof.
 
 - **PySpark**, end-to-end, via the `pytest` plugin (baseline, fail-fast loop, timeout watchdog, circuit breaker).
 - **Java & Scala pipelines**, end-to-end, via the Maven plugin (`spark-mutation-testing:mutate`) and the JUnit 5 bridge (`mutator-junit5`).
-- **Spark 3.5.x / Scala 2.12 + 2.13** shims.
+- **Spark 3.5.x / Scala 2.12 + 2.13** shims and **Spark 4.2.x / Scala 2.13** shim, with pinned cross-version goldens (a coordinate computed under 3.5 addresses the same logical mutation under 4.2).
 - **Mutator families** — Join (`INNER → LEFT`/`CROSS`/`ANTI`), Filter (`A ∧ B → A`/`B`/`false`/`¬P`), Aggregate, Window, Null-Coalesce, Project.
+- **CI version matrix** — one leg per supported Spark/Scala combination (`3.5_2.12`, `3.5_2.13`, `4.2_2.13`), each verifying its shim's goldens and its bundled wheel jar.
 
-Planned next: the Spark-version matrix with a CI matrix, first-class ScalaTest
-support (WP-18, deferred), and governance gates.
+Planned next: filling the N-2 window (Spark 4.1/4.0 combinations via the
+[version-addition SOP](docs/VERSION_ADDITION_SOP.md)), first-class ScalaTest
+support (WP-18, deferred), and further governance gates.
 
 ---
 
@@ -199,11 +278,14 @@ docs/                  core idea, architecture, contracts, guides, work packages
 ## Documentation
 
 - [Core idea](docs/core_idea.md) — the vision and requirements.
+- [Catalyst internals](docs/CATALYST.md) — how Catalyst behaves and exactly how this library bends it (teaching document / whitepaper seed).
 - [Architecture](docs/ARCHITECTURE.md) — how it's built.
 - [Developer guide](docs/developer-guide.md) — orchestration modes, fork-boundary protocol, config, and the quality gate.
 - [Releasing](docs/RELEASING.md) — the release runbook: version model, the ritual, guard rails.
 - [Scala pipelines](docs/SCALA_PIPELINES.md) — Scala-based Spark pipeline support (JUnit 5 today; ScalaTest status).
+- [Gradle](docs/GRADLE.md) — the thin path: in-process mutation testing under Gradle's `test` task (no plugin).
 - [Contracts](docs/CONTRACTS.md) — the frozen API surface (contributor reference).
+- [Test & verification strategy](docs/TEST_STRATEGY.md) — what proves what, the regression net, and how to verify a new Spark version.
 - [Adding a Spark version](docs/VERSION_ADDITION_SOP.md) — the runbook for a new shim.
 
 ---
@@ -211,5 +293,5 @@ docs/                  core idea, architecture, contracts, guides, work packages
 ## Status
 
 Active development. PySpark, Java, and Scala (JUnit 5-in-Scala) pipelines on
-Spark 3.5.x are usable end-to-end; the Spark-version matrix, the ScalaTest
-bridge, and governance gates are planned.
+Spark 3.5.x and 4.2.x are usable end-to-end; N-2 window fill-in (4.1/4.0), the
+ScalaTest bridge, and further governance gates are planned.

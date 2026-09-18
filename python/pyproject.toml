@@ -7,7 +7,9 @@ name = "pytest-spark-mutation-testing"
 version = "0.1.0"
 requires-python = ">=3.9"
 dependencies = [
-    "pyspark>=3.5,<3.6",
+    # Supported shim matrix: Spark 3.5.x (latest LTS) and 4.2.x (current GA
+    # minor, Scala 2.13-only). See pytest_spark_mutator/version_detect.py.
+    "pyspark>=3.5,<4.3",
     "py4j>=0.10.9",
     "tomli; python_version < '3.11'",
 ]

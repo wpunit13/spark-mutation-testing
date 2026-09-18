@@ -36,9 +36,9 @@ public final class ReportSink {
      * immediately after classifying a mutant, once per mutant, exactly once.
      *
      * @param mutantId must already exist in the catalog.
-     * @param status one of "KILLED", "SURVIVED", "TIMED_OUT", "ERRORED"
-     *        (exact string match, case-sensitive; any other value throws
-     *        IllegalArgumentException).
+     * @param status one of "KILLED", "SURVIVED", "TIMED_OUT", "ERRORED",
+     *        "NOT_APPLIED" (exact string match, case-sensitive; any other
+     *        value throws IllegalArgumentException).
      * @param elapsedMillis wall-clock duration of this mutant's test execution.
      * @param failureDetailOrNull for KILLED/ERRORED: the failing assertion
      *        message or exception string; null for SURVIVED; null or a
@@ -91,6 +91,20 @@ public final class ReportSink {
                 outputDir,
                 MutationCatalogAccess.allEntries(),
                 Map.copyOf(instance().results));
+    }
+
+    /**
+     * Count of recorded outcomes carrying the given status. Used by the
+     * WP-24 governance gate (real-failure ERRORED and not-applied ratio).
+     */
+    public static int countByStatus(MutantStatus status) {
+        int count = 0;
+        for (MutantResult result : instance().results.values()) {
+            if (result.getStatus() == status) {
+                count++;
+            }
+        }
+        return count;
     }
 
     /** Read accessor used by the report writers. */

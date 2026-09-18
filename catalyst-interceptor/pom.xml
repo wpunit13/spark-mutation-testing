@@ -21,7 +21,7 @@
       interceptor-api       - Spark-agnostic SPI. No concrete Catalyst types.
       interceptor-dispatch  - ServiceLoader-based runtime shim selection.
       interceptor-runtime   - SparkSessionExtensions + Rule[LogicalPlan].
-      interceptor-spark-*   - One implementation per Spark/Scala binary cell.
+      interceptor-spark-*   - One implementation per Spark/Scala combination.
       interceptor-bundle-*  - Shaded fat jar consumed by the Python wheel.
 
     Module order below is the dependency order and Maven honours it.
@@ -39,7 +39,17 @@
     <module>interceptor-dispatch</module>
     <module>interceptor-spark-3.5_2.12</module>
     <module>interceptor-spark-3.5_2.13</module>
+    <module>interceptor-spark-4.2_2.13</module>
     <module>interceptor-runtime</module>
     <module>interceptor-bundle</module>
+    <!-- WP-19 multi-shim wheel: one bundle per Scala binary combination, mirroring
+         the 2.13 bundle's shade configuration. Listed after interceptor-bundle
+         per the description above (bundles package every other module). -->
+    <module>interceptor-bundle-2.12</module>
+    <!-- WP-20: Spark 4.2 bundle. Recompiles the version-agnostic api/dispatch/
+         runtime layers against THIS combination's Spark 4.2.0 (the 3.5-built runtime
+         classes cannot link on a 4.2 driver), so it needs its own build-helper
+         sources and sits last like every bundle. -->
+    <module>interceptor-bundle-4.2</module>
   </modules>
 </project>

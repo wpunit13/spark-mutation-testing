@@ -22,6 +22,10 @@ lifecycle hook that (a) activates the fork's mutant and loads `catalog.json`,
 and (b) writes the applied marker after the tests run. That glue ships today
 only for JUnit 5.
 
+> **Gradle note:** JUnit 5 style suites (this §2) also work under Gradle via
+> the thin path — the standard `test` task plus `mutator-junit5`, no plugin.
+> See [`GRADLE.md`](GRADLE.md); the fork-per-mutant loop stays Maven-only.
+
 ---
 
 ## 2. Supported today: JUnit 5 written in Scala

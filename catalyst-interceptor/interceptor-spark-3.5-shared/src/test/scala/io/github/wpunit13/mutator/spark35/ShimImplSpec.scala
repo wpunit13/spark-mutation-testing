@@ -21,7 +21,7 @@ import org.scalatest.funsuite.AnyFunSuite
  * compiled into both the `_2.12` and `_2.13` shim modules (via
  * build-helper-maven-plugin add-test-source), so the shared mutation logic is
  * exercised against each Scala binary's Spark runtime. The concrete
- * `ShimImpl`'s `supportedVersion` is supplied by the per-cell subclass, not
+ * `ShimImpl`'s `supportedVersion` is supplied by the per-combination subclass, not
  * asserted here.
  */
 class ShimImplSpec extends AnyFunSuite with BeforeAndAfterAll {
@@ -39,7 +39,7 @@ class ShimImplSpec extends AnyFunSuite with BeforeAndAfterAll {
   }
 
   // Exercise the shared mutation logic directly via an anonymous subclass;
-  // the real per-cell ShimImpl only differs by its supportedVersion string.
+  // the real per-combination ShimImpl only differs by its supportedVersion string.
   private val shim: Spark35ShimBase = new Spark35ShimBase {
     override val supportedVersion: SparkShimVersion = SparkShimVersion("3.5", "2.13")
   }

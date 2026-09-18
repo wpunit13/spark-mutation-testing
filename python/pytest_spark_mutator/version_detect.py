@@ -3,6 +3,11 @@
 Every pyspark import is lazy (inside the function bodies) so this module can
 be imported — and unit-tested — in environments where PySpark is not
 installed.
+
+Supported matrix (WP-20): {3.5_2.12, 3.5_2.13, 4.2_2.13} — the latest LTS line
+(Spark 3.5) plus the newest generally-available minor (Spark 4.2). This set is
+kept identical to ``SparkVersionDetector.SUPPORTED_VERSIONS`` on the JVM side;
+``python/tests/test_version_detect.py`` asserts the parity.
 """
 
 from __future__ import annotations
@@ -12,7 +17,17 @@ from pathlib import Path
 
 from .exceptions import UnsupportedSparkVersionError
 
-VERSION_MATRIX: dict[str, str] = {"3.5_2.13": "interceptor-spark-3.5_2.13.jar"}
+# Every supported Spark/Scala combination (Spark minor × Scala binary pair)
+# with a built, bundled shim jar. WP-20 adds the 4.2_2.13 combination (newest
+# GA minor; Spark 4.x is Scala 2.13-only). WP-19 added 3.5_2.12. Empirically
+# verified 2026-09-13: the pyspark 3.5.9
+# distribution in the e2e environment bundles spark-core_2.13-3.5.3.jar, so
+# detection resolves 3.5_2.13 there and the JVM e2e is unaffected.
+VERSION_MATRIX: dict[str, str] = {
+    "3.5_2.13": "interceptor-spark-3.5_2.13.jar",
+    "3.5_2.12": "interceptor-spark-3.5_2.12.jar",
+    "4.2_2.13": "interceptor-spark-4.2_2.13.jar",
+}
 
 _SCALA_CORE_PATTERN = re.compile(r"^spark-core_(2\.12|2\.13)-.*\.jar$")
 

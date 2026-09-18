@@ -72,6 +72,17 @@ _MUTATOR_NAMES = {
 }
 _UNKNOWN_MUTATOR = "UnknownMutator"
 
+# Fork-directive / user-config keys (developer-guide §3.1/§3.2): one key
+# across both surfaces. The plugin propagates the TOML config into the driver
+# JVM through these properties so the engine-side filters and the report's
+# config echo see the same values the Python loop enforces.
+_PROP_TARGET_MODULES = "spark.mutator.targetModules"
+_PROP_EXCLUDED_MUTATORS = "spark.mutator.excludedMutators"
+_PROP_TIMEOUT_MULTIPLIER = "spark.mutator.timeoutMultiplier"
+_PROP_MIN_MUTATION_SCORE = "spark.mutator.minMutationScore"
+_PROP_MAX_ERRORED_COUNT = "spark.mutator.maxErroredCount"
+_PROP_MAX_NOT_APPLIED_RATIO = "spark.mutator.maxNotAppliedRatio"
+
 # Stash key under which the active _MutationSession is stored on the pytest
 # config; the single source of truth for "is the plugin active".
 _SESSION_KEY = pytest.StashKey()
@@ -147,7 +158,9 @@ def pytest_runtest_protocol(item, nextitem):
         return
     start = time.perf_counter()
     try:
+        session._apply_engine_config()
         session._set_test_context(item.nodeid)
+        session._set_file_path_hint(item.nodeid)
         yield
     finally:
         session._clear_test_context()
@@ -226,6 +239,34 @@ def pytest_sessionfinish(session, exitstatus) -> None:
         # written reports disambiguate.
         session.exitstatus = 2
         return
+
+    # WP-24 population gates: real-failure ERRORED is zero-tolerance (a dead
+    # session or shim violation means the harness/engine is broken); the
+    # designed not-applied population is ratio-gated. A negative knob disables
+    # its check.
+    errored = mut_session.results.get("ERRORED", 0)
+    not_applied = mut_session.results.get("NOT_APPLIED", 0)
+    skipped = mut_session.results.get("SKIPPED", 0)
+    total = sum(mut_session.results.values())
+    if errored > mut_session.config.max_errored_count:
+        print(
+            f"spark-mutator: real-failure ERRORED count {errored} exceeds "
+            f"max_errored_count {mut_session.config.max_errored_count}; "
+            "failing the run."
+        )
+        session.exitstatus = 2
+        return
+    if mut_session.config.max_not_applied_ratio >= 0:
+        denominator = total - skipped
+        ratio = (not_applied / denominator) if denominator > 0 else 0.0
+        if ratio > mut_session.config.max_not_applied_ratio:
+            print(
+                f"spark-mutator: not-applied ratio {ratio:.2f} "
+                f"({not_applied}/{denominator}) exceeds max_not_applied_ratio "
+                f"{mut_session.config.max_not_applied_ratio:.2f}; failing the run."
+            )
+            session.exitstatus = 2
+            return
 
 
 # ---------------------------------------------------------------------------
@@ -306,6 +347,7 @@ class _MutationSession:
         self.driver_unresponsive_error: Exception | None = None
         self.mutation_call_failed = False
         self.mutation_failed_nodeid: str | None = None
+        self._engine_config_applied = False
         # Epoch-millis lower bound for the §3.2 diff-and-drop reset: state
         # created before the baseline started counts as pre-existing.
         self.baseline_start_epoch_ms = int(time.time() * 1000)
@@ -329,16 +371,59 @@ class _MutationSession:
 
     # -- raw JVM access ----------------------------------------------------
     # Deliberate, narrow exception to the "go through MutatorBridge" rule:
-    # MutatorBridge does not expose TestContextTracker and must not be
-    # modified. These two methods are the only raw-JVM access in this plugin;
-    # they are Discovery-phase bookkeeping specific to the baseline loop,
-    # not general-purpose bridge operations.
+    # MutatorBridge does not expose TestContextTracker, the system-property
+    # channel, or CatalystMutationRule and must not be modified. These methods
+    # are the only raw-JVM access in this plugin; they are baseline-phase
+    # bookkeeping (test-context tagging, WP-19 config propagation and
+    # file-path hints), not general-purpose bridge operations.
 
     def _set_test_context(self, nodeid: str) -> None:
         self.jvm.io.github.wpunit13.mutator.TestContextTracker.setCurrentTestId(nodeid)
 
     def _clear_test_context(self) -> None:
         self.jvm.io.github.wpunit13.mutator.TestContextTracker.clearCurrentTestId()
+
+    def _apply_engine_config(self) -> None:
+        """One-time propagation of the TOML config into the driver JVM (WP-19).
+
+        The properties must be set before the first analysis so the engine-side
+        filters (CatalystMutationRule reads them per invocation) and the
+        report's config echo (ReportWriter resolves them at finalize time) see
+        them. ``excluded_mutators`` is propagated verbatim: canonical
+        OperatorType names are enforced engine-side, legacy mutator display
+        names are ignored there (with a one-time warning) and enforced by the
+        Python loop below, which understands both key shapes.
+        """
+        if self._engine_config_applied:
+            return
+        system = self.jvm.java.lang.System
+        excluded = ",".join(self.config.excluded_mutators)
+        targets = ",".join(self.config.target_modules)
+        if excluded:
+            system.setProperty(_PROP_EXCLUDED_MUTATORS, excluded)
+        if targets:
+            system.setProperty(_PROP_TARGET_MODULES, targets)
+        system.setProperty(_PROP_TIMEOUT_MULTIPLIER, str(self.config.timeout_multiplier))
+        system.setProperty(_PROP_MIN_MUTATION_SCORE, str(self.config.min_mutation_score))
+        system.setProperty(_PROP_MAX_ERRORED_COUNT, str(self.config.max_errored_count))
+        system.setProperty(_PROP_MAX_NOT_APPLIED_RATIO, str(self.config.max_not_applied_ratio))
+        self._engine_config_applied = True
+
+    def _set_file_path_hint(self, nodeid: str) -> None:
+        """Best-effort test-file-granularity hint for targetModules (WP-19).
+
+        Wired ONLY when target_modules is configured: the hint is a direct
+        input to the MutantID formula, so changing it unconditionally would
+        churn every mutantId (and break cross-run mutantId comparisons such as
+        the weak-vs-hardened e2e proof). With target_modules empty the hint
+        stays at its default "unknown" and mutantIds stay stable.
+        """
+        if not self.config.target_modules:
+            return
+        test_file = nodeid.split("::", 1)[0]
+        self.jvm.io.github.wpunit13.mutator.CatalystMutationRule.setCurrentFilePathHint(
+            test_file
+        )
 
     # -- mutation loop ------------------------------------------------------
 
@@ -349,14 +434,29 @@ class _MutationSession:
         driver = self.driver
         config = self.config
 
+        # WP-19 exclusion keys: canonical OperatorType names (case-
+        # insensitive) plus the legacy mutator display names (exact match,
+        # backward compatible). Canonical names are additionally enforced
+        # engine-side via the spark.mutator.excludedMutators system property
+        # (see _apply_engine_config), so excluded operators typically never
+        # reach this catalog at all; the check below remains as the second
+        # layer and the only enforcement point for legacy names.
+        excluded_operator_types = {
+            name.strip().upper() for name in config.excluded_mutators
+        }
+
         survivors = []
         for entry in catalog:
             mutator_name = _mutator_name_for(entry)
-            if mutator_name in config.excluded_mutators:
+            operator_type = str(entry.get("operatorType", "")).strip().upper()
+            if operator_type in excluded_operator_types or (
+                mutator_name in config.excluded_mutators
+            ):
                 logger.debug(
-                    "spark-mutator: excluding %s (mutant %s)",
+                    "spark-mutator: excluding %s (mutant %s, operator %s)",
                     mutator_name,
                     entry["mutantId"],
+                    entry.get("operatorType"),
                 )
                 continue
             survivors.append((entry["mutantId"], mutator_name))
@@ -493,11 +593,12 @@ class _MutationSession:
             self.watchdog.disarm()
         if self.driver_unresponsive_error is not None:
             raise self.driver_unresponsive_error
-        return self._classify_mutant(deadline)
+        return self._classify_mutant(deadline, mutant_id)
 
-    def _classify_mutant(self, deadline: float) -> tuple:
-        # Precedence per §2.6. An escaped MutatorJvmError / unexpected
-        # exception is handled by the caller's broad except (ERRORED).
+    def _classify_mutant(self, deadline: float, mutant_id: str) -> tuple:
+        # Precedence per §2.6, mirroring the in-process loop: an escaped
+        # MutatorJvmError / unexpected exception is handled by the caller's
+        # broad except (ERRORED).
         if self.watchdog.fired and self.driver_unresponsive_error is None:
             return "TIMED_OUT", f"deadline {deadline:.1f}s exceeded"
         if self.driver_unresponsive_error is not None:
@@ -506,6 +607,16 @@ class _MutationSession:
             return (
                 "KILLED",
                 f"test failed under mutation: {self.mutation_failed_nodeid}",
+            )
+        # WP-24: the rewrite must have executed for a SURVIVED to be honest.
+        # The engine-side tracker records the applied fact at rewrite time;
+        # a stale or missing id means the mutation never landed on a plan
+        # node that ran.
+        applied = self.bridge.get_applied_mutant_or_none()
+        if applied != mutant_id:
+            return (
+                "NOT_APPLIED",
+                "mutation was not applied (coordinate matched no plan node)",
             )
         return "SURVIVED", None
 

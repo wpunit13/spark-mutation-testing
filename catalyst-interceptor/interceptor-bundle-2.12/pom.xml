@@ -1,0 +1,195 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>io.github.wpunit13</groupId>
+    <artifactId>spark-mutation-testing-parent</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+    <relativePath>../../pom.xml</relativePath>
+  </parent>
+
+  <artifactId>interceptor-bundle-spark-3.5_2.12</artifactId>
+  <packaging>jar</packaging>
+
+  <name>interceptor-bundle-spark-3.5_2.12</name>
+  <description>
+    Produces the self-contained fat jar that the Python wheel mounts via --jars,
+    for Spark 3.5.x / Scala 2.12 (WP-19 multi-shim wheel).
+
+    WHY A SIBLING MODULE
+    --------------------
+    The pytest plugin mounts exactly ONE jar; a bundle must therefore contain
+    exactly ONE shim. The 2.12 shim jar carries its own 2.12-compiled copies of
+    the version-agnostic api classes (the shim module recompiles them for its
+    Scala binary), so bundling both shims into one jar would both duplicate the
+    api classes and put two PlanMutatorShim services on one classpath — the
+    exact packaging error ShimDispatcher fails loudly on. Following the
+    interceptor-bundle module's own guidance ("when a second Spark version is
+    added, give it its own bundle module"), this module mirrors that shade
+    configuration for the 2.12 combination.
+
+    LINKAGE STATUS (read before relying on this jar)
+    ------------------------------------------------
+    The non-shim Scala layers (api, dispatch, runtime) are consumed from the
+    reactor, which compiles them against the reactor-default Scala 2.13; only
+    the shim layer (Spark35ShimBase + ShimImpl) is 2.12-compiled. The erased
+    JVM descriptors of the SPI differ between Scala 2.12 and 2.13 (e.g. the
+    `Seq` in PlanMutatorShim.classify erases to different types), so mounting
+    this jar on a 2.12-built PySpark is NOT yet proven to link. The api classes
+    are taken from the reactor artifact (shade-excluding the shim jar's copies)
+    so exactly one api copy ships, paired with the dispatch/runtime layers it
+    was compiled against. Full 2.12 support requires per-combination
+    compilation of api/dispatch/runtime — flagged as a spec gap in the WP-19
+    final report.
+
+    NO PACKAGE RELOCATION
+    ---------------------
+    Same rationale as interceptor-bundle: relocation would rename the
+    PlanMutatorShim interface named in spark.sql.extensions and break the
+    ServiceLoader contract. Distinct shims live in distinct packages and the
+    plugin mounts exactly one bundle per session.
+
+    Verify after building:
+      jar tf target/interceptor-spark-3.5_2.12.jar | grep -E \
+        "MutatorSparkExtension|MutantRegistry|ShimImpl|META-INF/services"
+    All four must be present, and the services file must be named
+      META-INF/services/io.github.wpunit13.mutator.api.PlanMutatorShim
+    containing the UNRELOCATED implementation class name
+    (io.github.wpunit13.mutator.spark35_212.ShimImpl).
+  </description>
+
+  <properties>
+    <!-- Module-local pin for the 2.12 combination, mirroring interceptor-spark-3.5_2.12. -->
+    <spark.version>3.5.3</spark.version>
+    <scala.version>2.12.18</scala.version>
+    <scala.binary.version>2.12</scala.binary.version>
+  </properties>
+
+  <dependencies>
+    <!--
+      All five bundled modules at compile scope so the shade plugin includes
+      them. Spark itself stays provided/excluded and is never bundled.
+    -->
+    <dependency>
+      <groupId>io.github.wpunit13</groupId>
+      <artifactId>spark-mutation-testing-core</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.github.wpunit13</groupId>
+      <artifactId>interceptor-api</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.github.wpunit13</groupId>
+      <artifactId>interceptor-dispatch</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.github.wpunit13</groupId>
+      <artifactId>interceptor-runtime</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.github.wpunit13</groupId>
+      <artifactId>interceptor-spark-3.5_2.12</artifactId>
+      <!-- Version-free: pinned by the root pom's dependencyManagement, per the
+           reactor convention that child modules declare no versions. -->
+    </dependency>
+
+    <dependency>
+      <groupId>org.apache.spark</groupId>
+      <artifactId>spark-sql_${scala.binary.version}</artifactId>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.scala-lang</groupId>
+      <artifactId>scala-library</artifactId>
+      <scope>provided</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <finalName>interceptor-spark-3.5_2.12</finalName>
+
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-shade-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>shade-bundle</id>
+            <phase>package</phase>
+            <goals>
+              <goal>shade</goal>
+            </goals>
+            <configuration>
+              <createDependencyReducedPom>true</createDependencyReducedPom>
+
+              <!--
+                MUST stay false. Minimisation removes classes with no static
+                reference, which is exactly how ShimImpl is loaded (reflectively,
+                via ServiceLoader) and how MutatorSparkExtension is loaded
+                (reflectively, by Spark from the spark.sql.extensions string).
+                Enabling this strips both and breaks the tool at runtime.
+              -->
+              <minimizeJar>false</minimizeJar>
+
+              <!--
+                Merges META-INF/services entries from all bundled artifacts.
+                Only the shim jar carries a services file here, so the merged
+                file names exactly one PlanMutatorShim implementation.
+              -->
+              <transformers>
+                <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+              </transformers>
+
+              <artifactSet>
+                <excludes>
+                  <exclude>org.apache.spark:*</exclude>
+                  <exclude>org.apache.hadoop:*</exclude>
+                  <exclude>org.scala-lang:*</exclude>
+                  <exclude>org.scala-lang.modules:*</exclude>
+                </excludes>
+              </artifactSet>
+
+              <filters>
+                <filter>
+                  <artifact>*:*</artifact>
+                  <excludes>
+                    <exclude>META-INF/*.SF</exclude>
+                    <exclude>META-INF/*.DSA</exclude>
+                    <exclude>META-INF/*.RSA</exclude>
+                    <exclude>META-INF/MANIFEST.MF</exclude>
+                    <exclude>module-info.class</exclude>
+                  </excludes>
+                </filter>
+                <!--
+                  The 2.12 shim jar recompiles the version-agnostic api sources
+                  for its Scala binary, so its copies would overlap the reactor
+                  api artifact byte-for-different-byte. Exclude them so exactly
+                  one api copy ships (the reactor-built one, paired with the
+                  dispatch/runtime layers). Spark35ShimBase is NOT excluded: it
+                  exists only inside the shim jars and must stay.
+                -->
+                <filter>
+                  <artifact>io.github.wpunit13:interceptor-spark-3.5_2.12</artifact>
+                  <excludes>
+                    <exclude>io/github/wpunit13/mutator/api/**</exclude>
+                  </excludes>
+                </filter>
+              </filters>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <configuration>
+          <skipTests>true</skipTests>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+</project>

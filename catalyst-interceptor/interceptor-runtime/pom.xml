@@ -57,6 +57,18 @@
     </dependency>
 
     <!--
+      Logging API for the rule's observable-skip/warn channel. Provided: the
+      driver JVM (Spark itself) supplies slf4j-api and a binding at runtime;
+      we must never package or pin a binding of our own. Version pinned by
+      the root pom to match Spark's own slf4j exactly.
+    -->
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-api</artifactId>
+      <scope>provided</scope>
+    </dependency>
+
+    <!--
       spark-sql (not just catalyst) because SparkSessionExtensions lives in
       org.apache.spark.sql. Provided: supplied by the consumer at runtime.
     -->
