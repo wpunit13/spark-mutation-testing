@@ -10,40 +10,49 @@ is left open, it is explicitly marked `[OPEN]`; everything else is fixed.
 
 ### 1.1 Module Graph
 
+```mermaid
+flowchart TD
+    CORE["mutator-core — Java 17+<br/>zero Spark imports (CI-enforced)<br/>MutantRegistry · DeterministicHasher<br/>catalog · test-impact map · JSON/SARIF/HTML writers"]
+
+    subgraph HARNESS["Harnesses — one per ecosystem"]
+        MOJO["maven-plugin<br/>fork-per-mutant loop · Surefire config<br/>governance gates · exit code 2"]
+        JUNIT5["mutator-junit5<br/>@EnableSparkMutationTesting<br/>in-process loop · fork-side bridge"]
+        PYTEST["pytest-spark-mutation-testing<br/>(pytest_spark_mutator)<br/>plugin · Py4J bridge · watchdog · circuit breaker"]
+    end
+
+    subgraph INTERCEPTOR["catalyst-interceptor — Scala"]
+        API["interceptor-api<br/>Spark-agnostic SPI:<br/>PlanMutatorShim · NodeCoordinate<br/>OperatorType · MutationCandidate"]
+        RUNTIME["interceptor-runtime<br/>MutatorSparkExtension · CatalystMutationRule"]
+        DISPATCH["interceptor-dispatch<br/>ShimDispatcher (ServiceLoader)"]
+        SHARED["interceptor-spark-3.5-shared<br/>all 3.5 mutation logic<br/>cross-built 2.12 + 2.13"]
+        S12["interceptor-spark-3.5_2.12<br/>thin glue: ShimImpl extends shared base"]
+        S213["interceptor-spark-3.5_2.13<br/>thin glue: ShimImpl extends shared base"]
+        S42["interceptor-spark-4.2_2.13<br/>independent ShimImpl"]
+        BUNDLE["interceptor-bundle / -2.12 / -4.2<br/>shaded uber-jars, one per combination<br/>(no relocation — see §5.2)"]
+        PLANNED["interceptor-spark-4.1_2.13 · 4.0_2.13<br/>planned (N-2 window, §5.5 SOP)"]
+    end
+
+    MOJO --> CORE
+    JUNIT5 --> CORE
+    PYTEST -->|"Py4J control channel (§2)"| CORE
+    RUNTIME --> API
+    RUNTIME --> DISPATCH
+    DISPATCH --> API
+    SHARED --> API
+    S42 --> API
+    S12 -.->|"supplies Scala binary version"| SHARED
+    S213 -.->|"supplies Scala binary version"| SHARED
+    BUNDLE -->|"shades"| CORE
+    BUNDLE -->|"shades"| API
+    BUNDLE -->|"shades"| RUNTIME
+    BUNDLE -->|"shades"| DISPATCH
+    BUNDLE -->|"shades + recompiles for 4.2"| SHARED
+    BUNDLE -->|"shades"| S42
+    MOJO -->|"Aether-resolves + injects one jar (§5.4)"| BUNDLE
+    PYTEST -->|"mounts one jar via PYSPARK_SUBMIT_ARGS (§5.3)"| BUNDLE
 ```
-                         ┌────────────────────────────────────────────┐
-                         │                mutator-core                │
-                         │   (Java 17+, zero Spark/Catalyst imports)   │
-                         │  MutantRegistry · Hashing · Test Impact Map │
-                         │  Report Model · JSON/HTML/SARIF Writers     │
-                         └───────────────▲───────────────┬─────────────┘
-                                          │ depends on    │ depends on
-                     ┌────────────────────┘               └─────────────────────┐
-                     │                                                          │
-        ┌────────────┴─────────────┐                              ┌────────────┴─────────────┐
-        │       maven-plugin        │                              │   pytest-spark-mutator    │
-        │  (Java, Surefire/Failsafe │                              │  (Python, pytest plugin,  │
-        │   orchestration for       │                              │   Py4J control channel)   │
-        │   Java & Scala pipelines) │                              └────────────┬─────────────┘
-        └────────────┬──────────────┘                                          │ mounts one jar from
-                     │ attaches (classpath introspection)                      │ pytest_spark_mutator/jars/
-                     ▼                                                          ▼
-        ┌──────────────────────────────────────────────────────────────────────────────┐
-        │                          catalyst-interceptor (Scala)                        │
-        │  ┌──────────────────────────────┐                                            │
-        │  │        interceptor-api        │  Spark-agnostic SPI:                      │
-        │  │  PlanMutatorShim · NodeCoordinate │ OperatorType, MutationCandidate,           │
-        │  │  OperatorType · MutationCandidate │  SparkShimVersion                          │
-        │  └───────────────▲────────────────┘                                            │
-        │                  │ implements                                                 │
-        │   ┌──────────────┼──────────────┬──────────────────┬────────────────────┐     │
-        │   │              │              │                  │                    │     │
-        │ interceptor-  interceptor-  interceptor-       interceptor-        interceptor- │
-        │ spark-3.5_2.12 spark-3.5_2.13 spark-4.2_2.13    dispatch            (planned:     │
-        │ (PlanMutatorShim  impls, one per Spark/Scala binary combination)  (ServiceLoader │ 4.1_2.13,   │
-        │                                                                     runtime pick) │ 4.0_2.13)   │
-        └──────────────────────────────────────────────────────────────────────────────────┘
-```
+
+
 
 > **Currently implemented shims:** `interceptor-spark-3.5_2.12`,
 > `interceptor-spark-3.5_2.13`, and `interceptor-spark-4.2_2.13` (WP-20).
@@ -57,13 +66,23 @@ is left open, it is explicitly marked `[OPEN]`; everything else is fixed.
 > combinations sit inside the N-2 window and remain *planned* backlog — adding
 > them follows [`VERSION_ADDITION_SOP.md`](VERSION_ADDITION_SOP.md) exactly as
 > WP-20 added 4.2_2.13.
+>
+> **Planned topology change (WP-26):** the fork-side harness glue (mutant
+> activation, catalog/marker handoff) moves from `mutator-junit5` into
+> `MutatorSparkExtension` (config-activated, shutdown-hook handoff), making
+> the Maven plugin path pom-only —
+> [`prompts_execution/packets-phase-3/WP-26.md`](../prompts_execution/packets-phase-3/WP-26.md).
 
 **Dependency direction is strictly one-way and acyclic:**
 `mutator-core` → nothing Spark-specific. `interceptor-api` → minimal Catalyst
 top-level types only (§5.1). `interceptor-spark-*` → concrete Catalyst
-internals for exactly one binary combination. `maven-plugin` and
-`pytest-spark-mutator` → `mutator-core` + the dispatcher, never a concrete
-shim directly.
+internals for exactly one binary combination (the 3.5 pair share
+`interceptor-spark-3.5-shared`; only `supportedVersion` differs per binary).
+`maven-plugin`, `mutator-junit5`, and `pytest-spark-mutator` → `mutator-core`
+(+ the dispatcher via the runtime), never a concrete shim directly. The
+`interceptor-bundle-*` leaf modules exist to break a reactor cycle
+(`interceptor-runtime` test-depends on a shim; a shim cannot therefore depend
+on runtime) and assemble the single jar each harness mounts.
 
 **Invariant (from spec §7.1):** `mutator-core` and the reporting/report-model
 code MUST NOT import any class under `org.apache.spark.sql.catalyst.*`. This
@@ -96,9 +115,11 @@ flowchart TD
         C4 -->|Yes| C5[KILLED / TIMED_OUT]
         C4 -->|No, all mapped tests pass| C6[SURVIVED]
         C4 -->|Crash/unrecoverable| C7[ERRORED]
+        C4 -->|Applied marker missing:<br/>mutation never executed| C8[NOT_APPLIED]
         C5 --> D1
         C6 --> D1
         C7 --> D1
+        C8 --> D1
     end
 
     subgraph Reset["4. State Reset & Isolation"]
@@ -116,7 +137,9 @@ flowchart TD
 **Key architectural point:** the *Discovery* phase and the *Mutation Execution
 Loop* phase both execute through the same `CatalystMutationRule`, distinguished
 only by `MutantRegistry` state (`IDLE` = passive observation/cataloging,
-`ACTIVE(id)` = rewrite). This guarantees the coordinate space observed during
+`ACTIVE(id)` = rewrite; the rule itself is registered twice — post-hoc
+resolution for discovery/matching, optimizer entry for the guaranteed-executed
+rewrite). This guarantees the coordinate space observed during
 discovery is identical to the coordinate space addressed during mutation —
 there is no separate "planning pass" that could drift from the "mutation
 pass."
@@ -150,7 +173,7 @@ default — this is exploited deliberately:
 | Channel | Opened by | Used for | Blocking behavior |
 |---|---|---|---|
 | **Execution channel** | The pytest test thread itself | `MutantRegistry.setActiveMutant`, running the actual DataFrame action that triggers the mutated plan | Blocks for the full duration of the Spark job |
-| **Control channel** | A dedicated watchdog thread started once per pytest session | `MutantRegistry.requestCancellation`, `MutantRegistry.getActiveMutantOrNull` (health poll), `SessionResetFacade.resetSessionState` | Must return in milliseconds; never waits on a Spark job |
+| **Control channel** | A dedicated watchdog thread started once per pytest session | `sparkContext.cancelJobGroup` (via the gateway handle), `statusTracker.getJobIdsForGroup` health polls, `SessionResetFacade.resetSessionState` | Must return in milliseconds; never waits on a Spark job |
 
 This split is what makes watchdog cancellation possible at all: if a single
 channel were used, the watchdog's cancel call would queue behind the hung
@@ -194,8 +217,8 @@ sequenceDiagram
         PT->>PT: classify TIMED_OUT
     end
 
-    PT->>PY4J: SessionResetFacade.resetSessionState(spark)  [reset checklist, §3]
-    PT->>PY4J: MutantRegistry.getInstance().clearActiveMutant()
+    PT->>PY4J: SessionResetFacade.resetSessionState(spark, epoch)  [reset checklist, §3]
+    PT->>PY4J: MutantRegistry.getInstance().clearActiveMutant(mutantId)
     REG-->>PY4J: state: ACTIVE -> IDLE
 ```
 
@@ -264,7 +287,7 @@ the first mutant is activated.
 | 5 | Broadcast variables (`BroadcastExchangeExec` reuse, `ContextCleaner`-managed) | No direct "clear all broadcasts" API is safe to call generically; instead, because each mutant re-triggers a fresh `Dataset` construction from the harness (not a mutation of an existing broadcasted `Dataset` instance), stale broadcasts are avoided structurally. As a safety net, force a GC-triggered cleanup checkpoint: `sparkContext.cleaner.foreach(_.doCleanupBroadcast(id, blocking = true))` is **not** invoked per-id (too invasive); instead rely on (1)+(2) plus periodic full unpersist of `sparkContext.getPersistentRDDs` to bound growth. | Broadcast joins are keyed by the physical plan's exchange id, which is freshly generated per plan build in this architecture, so cross-mutant reuse is structurally impossible as long as (1) prevents `Dataset`-level object reuse. |
 | 6 | Whole-stage codegen generated-class cache (Janino) | No clearing needed per-mutant under normal operation — Spark's `CodeGenerator` cache is an LRU bounded by `spark.sql.codegen.cache.maxEntries` (default is bounded, not unbounded). This is instead a **long-run growth risk**, handled as a periodic (every *K* mutants, configurable, default `K=500`) call to evict via `spark.conf.set` cache-size cycling or, if unavoidable metaspace growth is observed, a full JVM restart (§6.2). | Mutation changes generated code on essentially every mutant (different AST ⇒ different generated bytecode), so this cache churns constantly; treating it as a periodic/major-restart concern rather than a per-mutant concern balances correctness against the cost of clearing it every iteration. |
 | 7 | Adaptive Query Execution subquery/exchange reuse cache (`ReuseExchangeAndSubquery`) | No explicit clear required — this cache is scoped to a single `QueryExecution` instance and is not retained across separate `Dataset` builds, so it cannot leak across mutants under this architecture's "always rebuild the `Dataset` fresh per test" execution model. | Documented here explicitly so implementers do not assume it needs manual invalidation — it does not, given the execution model's constraints. |
-| 8 | `MutantRegistry` active-mutant state | `MutantRegistry.getInstance().clearActiveMutant()` | Not a Spark cache, but must be the *last* step of the reset sequence so that any lingering asynchronous job triggered by the just-finished test cannot pick up the *next* mutant's id if it races the reset. |
+| 8 | `MutantRegistry` active-mutant state | `MutantRegistry.getInstance().clearActiveMutant(mutantId)` | Not a Spark cache, but must be the *last* step of the reset sequence so that any lingering asynchronous job triggered by the just-finished test cannot pick up the *next* mutant's id if it races the reset. |
 
 ### 3.2 Canonical Reset Sequence (must run in this exact order)
 
@@ -274,7 +297,7 @@ the first mutant is activated.
 3. spark.sessionState.catalog.invalidateAll()                 // (#3)
 4. diff-and-drop temp views created during the just-finished test              // (#4)
 5. [every K mutants] codegen cache pressure relief / restart check             // (#6)
-6. MutantRegistry.getInstance().clearActiveMutant()            // (#8, must be last)
+6. MutantRegistry.getInstance().clearActiveMutant(mutantId)     // (#8, must be last)
 ```
 
 This sequence is invoked from `SessionResetFacade.resetSessionState(spark)`
@@ -368,13 +391,16 @@ supported Spark version matrix.
 
 ### 4.4 Relationship to `MutantID`
 
-The top-level identifier from spec §2,
+The top-level identifier (frozen; see `CONTRACTS.md` and
+`mutator-core`'s `DeterministicHasher.computeMutantId`),
 
 $$
-\text{MutantID} = \text{hash}(\text{FilePath} + \text{PlanNodeId} + \text{OperatorType} + \text{MutationIndex}),
+\text{MutantID} = \text{trunc}_{64}\Big(\text{SHA-256}\big(\texttt{FilePath} \| \texttt{NodeCoordinate} \| \texttt{OperatorType} \| \texttt{MutationIndex}\big)\Big),
 $$
 
-uses `PlanNodeId := NodeCoordinate` as computed above. `OperatorType` is
+uses `NodeCoordinate` as computed above (the spec's original "PlanNodeId"
+term — Spark has no stable plan-node ids, which is the whole point of §4.2).
+`OperatorType` is
 included redundantly in both formulas deliberately — `NodeCoordinate` already
 embeds it, but keeping it explicit in `MutantID` protects against the
 (cryptographically remote, but architecturally undesirable to rely on)
@@ -410,9 +436,18 @@ catalyst-interceptor/
 │   └── src/main/scala/.../SparkShimVersion.scala
 ├── interceptor-dispatch/                # Scala, ServiceLoader-based runtime dispatcher
 │   └── src/main/scala/.../ShimDispatcher.scala
-├── interceptor-spark-3.5_2.12/
-├── interceptor-spark-3.5_2.13/
-├── interceptor-spark-4.2_2.13/
+├── interceptor-runtime/                 # MutatorSparkExtension + CatalystMutationRule
+│   │                                    # (registered via spark.sql.extensions)
+├── interceptor-spark-3.5-shared/        # ALL 3.5 mutation logic, cross-built 2.12 + 2.13
+│   └── src/main/scala/.../Spark35ShimBase.scala
+├── interceptor-spark-3.5_2.12/          # thin: ShimImpl extends Spark35ShimBase,
+├── interceptor-spark-3.5_2.13/          #   supplies only supportedVersion
+├── interceptor-spark-4.2_2.13/          # independent ShimImpl (4.2 Catalyst signatures)
+├── interceptor-bundle/                  # shaded uber-jar → interceptor-spark-3.5_2.13.jar
+├── interceptor-bundle-2.12/             #   → interceptor-spark-3.5_2.12.jar
+├── interceptor-bundle-4.2/              #   → interceptor-spark-4.2_2.13.jar
+│                                        #   (recompiles api/dispatch/runtime from
+│                                        #    source against Spark 4.2 — see §5.2)
 └── (planned: interceptor-spark-4.1_2.13/, interceptor-spark-4.0_2.13/)
     └── (each) src/main/scala/.../ShimImpl.scala + src/main/resources/META-INF/services/...PlanMutatorShim
 ```
@@ -474,9 +509,10 @@ which both packaging paths require.
    matching `spark-core_(2\.12|2\.13)-.*\.jar`, extracting the Scala suffix.
    This is required because `pyspark.__version__` alone does not disambiguate
    the Scala build.
-3. **Lookup:** the plugin consults a static `VERSION_MATRIX: Dict[str, str]`
-   in `plugin.py` mapping `"<major.minor>_<scala>"` → jar filename. If
-   `pyspark.__version__` resolves to a minor version not present in the
+3. **Lookup:** the plugin consults the static `VERSION_MATRIX: dict[str, str]`
+   in `python/pytest_spark_mutator/version_detect.py` mapping
+   `"<major.minor>_<scala>"` → jar filename (via `resolve_shim_jar_filename`).
+   If `pyspark.__version__` resolves to a minor version not present in the
    matrix (including any version outside the current N-2 window), the plugin
    raises `UnsupportedSparkVersionError`, listing `sorted(VERSION_MATRIX.keys())`
    in the message, and aborts before any `SparkSession` is created.
@@ -508,7 +544,11 @@ which both packaging paths require.
 3. It resolves that artifact transitively via the Maven Resolver
    (`Aether`) API at plugin-execution time (not a static `<dependency>` in
    the user's `pom.xml`) and appends its resolved local-repo path to the
-   Surefire/Failsafe `additionalClasspathElements` / `argLine`.
+   Surefire/Failsafe `additionalClasspathElements`, and merges
+   `-Dspark.sql.extensions=io.github.wpunit13.mutator.MutatorSparkExtension`
+   plus Spark's mandatory modular-runtime JVM args (the `--add-opens` set)
+   into the `argLine` (`SurefireConfigurator`; opt-out
+   `-Dspark.mutator.injectAddOpens=false`, no-op on Java 8).
 4. If no matching artifact coordinate exists for the detected
    `<major.minor>_<scala_ver>`, the Mojo fails the build with the same
    `UnsupportedSparkVersionError` semantics as the Python path (message
@@ -574,6 +614,13 @@ partition) would not actually stop.
 
 ### 6.2 Escalation Ladder
 
+> **Implementation status:** stages 1–3 are implemented on the PySpark path
+> (`python/pytest_spark_mutator/watchdog.py`, `escalate_cancellation`). The
+> Maven fork path enforces the deadline by killing the Surefire fork
+> (`SurefireExecutor`). The **JVM in-process path (JUnit 5 extension /
+> Gradle) has no watchdog today** — designed as WP-25:
+> [`prompts_execution/packets-phase-3/WP-25.md`](../prompts_execution/packets-phase-3/WP-25.md).
+
 | Stage | Trigger | Action | Resulting classification |
 |---|---|---|---|
 | 1. Soft cancel | Watchdog deadline (`2 × baseline`) elapses | `sparkContext.cancelJobGroup(mutantId)` via control channel | Provisional `TIMED_OUT` |
@@ -582,6 +629,14 @@ partition) would not actually stop.
 | 4. Circuit breaker | Stage 3 reached, **or** a JVM panic/unresponsive gateway is detected (§2.6) | Harness force-kills the child JVM process (`Process.destroyForcibly()` for the Maven-plugin-forked JVM; for the PySpark path, `sparkContext.stop()` is attempted first with a short timeout, else the whole Python test-runner process restarts its `SparkContext` from scratch) | Remaining mutants for the run are queued as `ERRORED` (`reason: driver_watchdog_force_kill`) in a **fresh session**, which then resumes processing subsequent mutants — this is an explicit, logged exception to the "single-session reuse" performance goal, only exercised on unrecoverable failure. |
 
 ### 6.3 Cartesian Product Explosion Mitigation
+
+> **Implementation status: designed, not implemented.** The `SKIPPED` status
+> exists in `MutantStatus` (reserved for the pre-flight gate, excluded from
+> the score denominator) but nothing produces it yet — the fork loop's
+> `case SKIPPED -> { /* not produced here */ }` is explicit. None of the three
+> mechanisms below exist in code (verified by search: no `sizeInBytes`/
+> `Statistics`/runaway-listener/AQE-override anywhere). Until shipped, the
+> watchdog deadline (§6.2) is the only runaway protection.
 
 1. **Pre-flight cardinality gate:** during Discovery, when the baseline run
    captures each candidate `Join` node's Catalyst `Statistics` (via CBO
@@ -617,4 +672,4 @@ partition) would not actually stop.
 | 4 | Catalyst internal case-class signatures breaking across even *patch* releases within a nominally-supported minor version | Medium / Medium | Shim version pinning at exact patch granularity in CI (§5.2), `interceptor-api` isolation boundary preventing blast radius beyond one shim module | A patch-level break discovered post-release still requires an out-of-band shim patch release before the next scheduled minor-version SOP cycle |
 | 5 | Stale Spark caches leaking state between mutants, producing false `SURVIVED`/`KILLED` results | Medium / High (directly corrupts the tool's core output) | Exhaustive, ordered reset checklist (§3) + a periodic no-op "canary mutant" injected into the loop that must always evaluate to `SURVIVED`, used as a self-check that reset state is clean | Novel Spark caching layers introduced by future versions may not be covered until discovered and added to the checklist |
 | 6 | Driver crash/hang (OOM, cartesian explosion, infinite loop) halting or corrupting the remainder of a mutation run | Medium / High | Escalation ladder + circuit breaker (§6.2) + pre-flight cardinality gating (§6.3) | A hang inside native code or blocking I/O that ignores `Thread.interrupt()` can still exceed even the hard ceiling before the circuit breaker's forceful kill completes |
-| 7 | Scala binary incompatibility: multiple shim JARs (2.12 and 2.13 builds) coexisting on one classpath causing class-loading collisions | Low probability (only one jar is ever mounted per session by design), High impact if it occurs | Runtime selection logic mounts **exactly one** shim jar per session (§5.3/5.4); each shim jar relocates its packages during shading (§5.2) so that even accidental co-presence on a classpath cannot collide | A user manually adding a shim jar to their own classpath outside the plugin's control is explicitly unsupported and out of scope |
+| 7 | Scala binary incompatibility: multiple shim JARs (2.12 and 2.13 builds) coexisting on one classpath causing class-loading collisions | Low probability (only one jar is ever mounted per session by design), High impact if it occurs | Runtime selection logic mounts **exactly one** bundle jar per session (§5.3/5.4); bundles deliberately do **not** relocate packages (relocation would rename the `PlanMutatorShim` interface `ServiceLoader` matches and the class named in `spark.sql.extensions`), and distinct shims live in distinct packages so accidental co-presence still cannot collide | A user manually adding a second bundle jar to their own classpath outside the plugin's control is explicitly unsupported and out of scope |

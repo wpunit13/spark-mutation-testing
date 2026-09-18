@@ -33,6 +33,8 @@ A runnable proof lives in `examples/spark-gradle-junit5/`.
 | Fork-per-mutant external loop | ❌ Maven-only (`spark-mutation-testing:mutate`) |
 | `spark-mutation-testing:mutate` plugin goal | ❌ Maven-only |
 | Dedicated governance-gate exit code 2 | ❌ Maven-only — under Gradle a failed gate surfaces as the generic JUnit/Gradle non-zero test failure (same limitation as the in-process path under Surefire; see [`developer-guide.md`](developer-guide.md) §4, WP-19) |
+| Per-mutant timeout enforcement (`timeoutMultiplier`) | ❌ Maven-only — the in-process loop has no watchdog; a hung mutant hangs the test JVM. The property is still accepted and echoed into the report's `config` block, but nothing enforces a deadline. Tracked as WP-25: [`prompts_execution/packets-phase-3/WP-25.md`](../prompts_execution/packets-phase-3/WP-25.md) |
+| `exitProcessOnGateFailure` / `injectAddOpens` | N/A — Mojo parameters. Under Gradle, gate failures are ordinary test failures and the JVM opens are configured by hand (§3) |
 
 The fork-per-mutant loop is built on Surefire's fork JVM lifecycle
 (`argLine` injection, `-Dtest=` filters, fork orchestration). Gradle's `Test`
@@ -76,7 +78,8 @@ test {
 
     // REQUIRED. Spark 3.5 on Java 17 fails without these opens.
     // Copied verbatim from the root POM's spark.test.jvm.args — do not
-    // invent a variant.
+    // invent a variant. (The Maven plugin injects this set into Surefire
+    // automatically; Gradle has no equivalent hook, so it stays manual here.)
     jvmArgs '-Xmx2g', '-XX:+IgnoreUnrecognizedVMOptions',
         '--add-opens=java.base/java.lang=ALL-UNNAMED',
         '--add-opens=java.base/java.lang.invoke=ALL-UNNAMED',
@@ -118,9 +121,12 @@ Assertion guidance that materially affects the mutation score is in
 [`SCALA_PIPELINES.md`](SCALA_PIPELINES.md) §2.3 (assert exact rows, not
 counts; prefer `collect()` over `count()`).
 
-## 5. Quality gate
+## 5. Configuration surface (in-process)
 
-Set the floor as a test-task system property (unset = gate off, report only):
+Everything the in-process path reads is a **test-JVM system property**, set on
+the `test` task. The Gradle CLI trap mirrors Maven's: `gradle -Dspark.mutator.…`
+lands in the Gradle build JVM and never reaches the test workers — only
+`systemProperty` on the task (or `systemProperties` map) crosses over.
 
 ```groovy
 test {
@@ -128,10 +134,28 @@ test {
 }
 ```
 
+Full property surface, verified against the engine and extension code:
+
+| Property | Default | Meaning |
+|---|---|---|
+| `spark.mutator.minMutationScore` | unset | score floor; unset = gate off |
+| `spark.mutator.maxErroredCount` | `0` | WP-24: max real-failure ERRORED (dead sessions, shim violations); negative disables |
+| `spark.mutator.maxNotAppliedRatio` | `0.20` | WP-24: max designed not-applied ratio; negative disables |
+| `spark.mutator.enabled` / `spark.mutator.disabled` | — | force the extension on/off — `disabled=true` gives a plain baseline run with no mutation loop |
+| `spark.mutator.outputDirectory` | `target/spark-mutator-reports` (a Maven-ism) | report dir; §3 points it at Gradle's `build/` instead |
+| `spark.mutator.excludedMutators` | *(empty)* | CSV of operator types (`JOIN`, `FILTER`, `AGGREGATE`, `WINDOW`, `PROJECT`, `OTHER`); the engine skips them at discovery AND refuses to rewrite them mid-run |
+| `spark.mutator.targetModules` | *(empty)* | ⚠️ **do not set on the JVM paths today** — no JVM harness feeds a file-path hint, so setting it registers NOTHING (fail-safe, with a one-time warning). See [`developer-guide.md`](developer-guide.md) §3.1 |
+| `spark.mutator.timeoutMultiplier` | `2.0` | echoed into the report's `config` block only — **no deadline is enforced in-process** (§2; WP-25: [`prompts_execution/packets-phase-3/WP-25.md`](../prompts_execution/packets-phase-3/WP-25.md)) |
+| `spark.sql.extensions` | — | interception; the extension self-heals it if forgotten, but declare it explicitly so plain runs are honest (§4) |
+
+All three gates (ERRORED count, not-applied ratio, score floor) run in
+`afterAll` **after** the report is flushed, so the artifact survives a breach;
+a violation throws from `afterAll` and surfaces as Gradle's generic non-zero
+test failure (§2) — there is no dedicated exit code on this path.
+
 When the score is below the floor, the extension throws from `afterAll` after
 the report is already on disk, so the Gradle build fails non-zero with the
-report artifact intact. The exit code is Gradle's generic test-failure code —
-the dedicated exit code 2 is a Maven-plugin-only affordance (§2 above).
+report artifact intact.
 
 ## 6. Maintenance expectation
 

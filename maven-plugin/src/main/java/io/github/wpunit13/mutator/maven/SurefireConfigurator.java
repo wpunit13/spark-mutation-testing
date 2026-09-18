@@ -20,6 +20,12 @@ import java.util.Set;
  * <ul>
  *   <li>Appends {@code -Dspark.sql.extensions=io.github.wpunit13.mutator.MutatorSparkExtension}
  *       to {@code argLine}.</li>
+ *   <li>Appends the JVM arguments Spark requires on modular runtimes (Java 9+):
+ *       the {@code --add-opens} set plus the Netty/reflect flags. Without these
+ *       the Spark driver dies with {@code InaccessibleObjectException} before
+ *       any test runs. Nothing is injected on Java 8 (the flags do not exist
+ *       there); pass {@code injectJvmOpens=false} to opt out (e.g. fork JDK
+ *       managed via toolchains).</li>
  *   <li>Adds the resolved interceptor JAR to {@code additionalClasspathElements}.</li>
  * </ul>
  */
@@ -28,6 +34,66 @@ public class SurefireConfigurator {
     public static final String EXTENSION_PROPERTY = "spark.sql.extensions";
     public static final String EXTENSION_CLASS = "io.github.wpunit13.mutator.MutatorSparkExtension";
     public static final String EXTENSION_ARG = "-D" + EXTENSION_PROPERTY + "=" + EXTENSION_CLASS;
+
+    /**
+     * JVM args Spark needs on modular runtimes (Java 9+), verbatim from the
+     * root POM's {@code spark.test.jvm.args} minus {@code -Xmx2g} (which is
+     * project-specific and must not be imposed downstream).
+     * {@code -XX:+IgnoreUnrecognizedVMOptions} first keeps the set
+     * forward-compatible across JDK releases.
+     */
+    static final List<String> SPARK_JVM_OPEN_ARGS = List.of(
+            "-XX:+IgnoreUnrecognizedVMOptions",
+            "--add-opens=java.base/java.lang=ALL-UNNAMED",
+            "--add-opens=java.base/java.lang.invoke=ALL-UNNAMED",
+            "--add-opens=java.base/java.lang.reflect=ALL-UNNAMED",
+            "--add-opens=java.base/java.io=ALL-UNNAMED",
+            "--add-opens=java.base/java.net=ALL-UNNAMED",
+            "--add-opens=java.base/java.nio=ALL-UNNAMED",
+            "--add-opens=java.base/java.util=ALL-UNNAMED",
+            "--add-opens=java.base/java.util.concurrent=ALL-UNNAMED",
+            "--add-opens=java.base/java.util.concurrent.atomic=ALL-UNNAMED",
+            "--add-opens=java.base/sun.nio.ch=ALL-UNNAMED",
+            "--add-opens=java.base/sun.nio.cs=ALL-UNNAMED",
+            "--add-opens=java.base/sun.security.action=ALL-UNNAMED",
+            "--add-opens=java.base/sun.util.calendar=ALL-UNNAMED",
+            "-Djdk.reflect.useDirectMethodHandle=false",
+            "-Dio.netty.tryReflectionSetAccessible=true");
+
+    private final boolean injectJvmOpens;
+
+    /** Creates a configurator with JVM-opens injection enabled (the default). */
+    public SurefireConfigurator() {
+        this(true);
+    }
+
+    /**
+     * @param injectJvmOpens when true, the mandatory modular-runtime JVM args
+     *                       (see {@link #SPARK_JVM_OPEN_ARGS}) are merged into
+     *                       every configured {@code argLine} on Java 9+.
+     */
+    public SurefireConfigurator(boolean injectJvmOpens) {
+        this.injectJvmOpens = injectJvmOpens;
+    }
+
+    /**
+     * True when the current JVM implements the module system (Java 9+), the
+     * only runtimes that accept {@code --add-opens}. Reads
+     * {@code java.specification.version}, handling both the legacy
+     * {@code 1.8} format and the modern {@code 17}/{@code 21} format.
+     * Package-private seam for tests.
+     */
+    static boolean isModularRuntime() {
+        String spec = System.getProperty("java.specification.version", "1.8");
+        if (spec.indexOf('.') > 0) {
+            return false; // legacy 1.x format => pre-9
+        }
+        try {
+            return Integer.parseInt(spec) >= 9;
+        } catch (NumberFormatException ignored) {
+            return false;
+        }
+    }
 
     public static final String SUREFIRE_GROUP_ID = "org.apache.maven.plugins";
     public static final String SUREFIRE_ARTIFACT_ID = "maven-surefire-plugin";
@@ -114,11 +180,7 @@ public class SurefireConfigurator {
         properties.setProperty(EXTENSION_PROPERTY, EXTENSION_CLASS);
         if (properties.containsKey(ARG_LINE)) {
             String existing = properties.getProperty(ARG_LINE);
-            if (existing == null || existing.isBlank()) {
-                properties.setProperty(ARG_LINE, EXTENSION_ARG);
-            } else if (!existing.contains(EXTENSION_ARG)) {
-                properties.setProperty(ARG_LINE, existing.trim() + " " + EXTENSION_ARG);
-            }
+            properties.setProperty(ARG_LINE, mergeArgs(existing));
         }
     }
 
@@ -153,30 +215,41 @@ public class SurefireConfigurator {
             String base = (properties != null && properties.containsKey(ARG_LINE))
                     ? properties.getProperty(ARG_LINE)
                     : null;
-            String finalValue = mergeExtensionArg(base);
+            String finalValue = mergeArgs(base);
             argLineNode = new Xpp3Dom(ARG_LINE);
             argLineNode.setValue(finalValue);
             configuration.addChild(argLineNode);
             return finalValue;
         }
-        String finalValue = mergeExtensionArg(argLineNode.getValue());
+        String finalValue = mergeArgs(argLineNode.getValue());
         argLineNode.setValue(finalValue);
         return finalValue;
     }
 
     /**
-     * Merges {@link #EXTENSION_ARG} into an argLine value: blank values are
-     * replaced outright, values already carrying the extension are kept
-     * verbatim, and anything else gets the extension appended.
+     * Merges the extension arg (and, when enabled and on a modular runtime,
+     * the mandatory Spark JVM opens) into an argLine value. Blank values are
+     * replaced outright; each token is appended only if not already present,
+     * so repeated configuration is idempotent.
      */
-    private static String mergeExtensionArg(String existing) {
-        if (existing == null || existing.isBlank()) {
-            return EXTENSION_ARG;
+    private String mergeArgs(String existing) {
+        String merged = mergeToken(existing, EXTENSION_ARG);
+        if (injectJvmOpens && isModularRuntime()) {
+            for (String arg : SPARK_JVM_OPEN_ARGS) {
+                merged = mergeToken(merged, arg);
+            }
         }
-        if (existing.contains(EXTENSION_ARG)) {
+        return merged;
+    }
+
+    private static String mergeToken(String existing, String token) {
+        if (existing == null || existing.isBlank()) {
+            return token;
+        }
+        if (existing.contains(token)) {
             return existing;
         }
-        return existing.trim() + " " + EXTENSION_ARG;
+        return existing.trim() + " " + token;
     }
 
     private List<String> updateAdditionalClasspathElements(Xpp3Dom configuration, List<String> jarPaths) {

@@ -72,6 +72,84 @@ min_mutation_score = 80.0                       # CI gate
 
 ---
 
+## Quick start — Java / Scala (Maven, JUnit 5)
+
+Two test-scoped dependencies and one annotation. Existing tests stay untouched:
+
+```xml
+<dependency>
+  <groupId>io.github.wpunit13</groupId>
+  <artifactId>mutator-junit5</artifactId>
+  <version>1.0.0-SNAPSHOT</version>
+  <scope>test</scope>
+</dependency>
+<dependency>
+  <groupId>io.github.wpunit13</groupId>
+  <artifactId>interceptor-bundle-spark-3.5_2.13</artifactId> <!-- match your Spark/Scala line -->
+  <version>1.0.0-SNAPSHOT</version>
+  <scope>test</scope>
+</dependency>
+```
+
+```java
+import io.github.wpunit13.mutator.junit5.EnableSparkMutationTesting;
+
+@EnableSparkMutationTesting
+class MyPipelineTest { /* existing tests unchanged */ }
+```
+
+**Where to put the annotation** — not on every class:
+
+- **Shared base class (recommended).** The annotation is `@Inherited` — put it
+  on your `AbstractSparkTest` once and every subclass is covered.
+- **No base class?** Annotate each Spark-touching test class — one line each,
+  mechanical. Non-Spark classes need nothing. (WP-26, planned, removes the
+  requirement entirely for the Maven plugin path —
+  [`prompts_execution/packets-phase-3/WP-26.md`](prompts_execution/packets-phase-3/WP-26.md).)
+- **Maven plugin path (`mutate`, CI).** At least one annotated class must
+  execute in each run: the extension is the fork-side bridge that hands
+  `catalog.json` and the applied markers back to the Mojo. **Zero annotated
+  classes ⇒ a silent empty report** (zero mutants, score 0.0%, build green).
+  Several annotated classes are fine — the bridge writes are safe to repeat.
+- **In-process standalone (`mvn test`).** The annotated class *drives the
+  loop* (its `afterAll` re-runs the suite per mutant and writes the report).
+  Run **one annotated class per run** — select it with Surefire
+  `<includes>`/a profile (the example's `-Pweak`/`-Phardened` do exactly
+  this). Multiple annotated classes in one run each trigger their own loop;
+  that configuration is untested.
+- **Auto-detection.** Not shipped — `mutator-junit5` registers no
+  `ServiceLoader` entry. A hand-rolled
+  `META-INF/services/org.junit.jupiter.api.extension.Extension` +
+  `junit.jupiter.extensions.autodetection.enabled=true` works for the Maven
+  plugin path (fork mode tolerates every class carrying the extension) but
+  must not be combined with standalone mode, where every registered class
+  would trigger its own mutation loop.
+
+Then either:
+
+```bash
+mvn test                                        # in-process loop (no plugin needed)
+mvn test-compile spark-mutation-testing:mutate  # fork-per-mutant loop (CI-grade)
+```
+
+> The plugin goal injects the mandatory Java 17+ JVM opens into Surefire for
+> you. The in-process `mvn test` path runs in *your* Surefire fork, so there
+> you add them yourself (once, in your Surefire `argLine`) — see
+> [`docs/developer-guide.md`](docs/developer-guide.md) §1.2.
+
+The Maven plugin auto-detects your Spark/Scala versions, resolves the matching
+interceptor, and injects the Spark extension **plus the mandatory Java 17+ JVM
+opens** into Surefire — no manual Surefire wiring. Reports land in
+`target/spark-mutator-reports/` (`json` + `sarif` + `html`).
+
+- Full guide: [`docs/developer-guide.md`](docs/developer-guide.md)
+- Runnable proof: [`examples/spark-java-pipeline/`](examples/spark-java-pipeline/)
+  (weak suite ⇒ mutants survive; hardened suite ⇒ mutants killed)
+- Supported today: Spark 3.5.x (Scala 2.12/2.13) and 4.2.x (Scala 2.13), JUnit 5
+  (Java or JUnit 5-in-Scala). ScalaTest bridge is planned (WP-18).
+
+---
+
 ## How it works
 
 ```mermaid

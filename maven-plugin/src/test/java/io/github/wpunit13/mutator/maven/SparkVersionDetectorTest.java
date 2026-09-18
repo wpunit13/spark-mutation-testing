@@ -264,8 +264,13 @@ class SparkVersionDetectorTest {
             File jarFile = tempJar.toFile();
             SurefireConfigurator.SurefireConfigResult result = configurator.configure(project, jarFile);
 
-            assertEquals("-Xmx2g -ea -Dspark.sql.extensions=io.github.wpunit13.mutator.MutatorSparkExtension",
-                    result.getArgLine());
+            // The user's argLine is preserved verbatim, the extension is
+            // appended, and (on modular runtimes) the mandatory JVM opens
+            // follow. On pre-9 runtimes nothing beyond the extension is added.
+            String expectedSuffix = SurefireConfigurator.isModularRuntime()
+                    ? SurefireConfigurator.EXTENSION_ARG + " " + String.join(" ", SurefireConfigurator.SPARK_JVM_OPEN_ARGS)
+                    : SurefireConfigurator.EXTENSION_ARG;
+            assertEquals("-Xmx2g -ea " + expectedSuffix, result.getArgLine());
         } finally {
             Files.deleteIfExists(tempJar);
         }

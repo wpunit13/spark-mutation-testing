@@ -161,4 +161,38 @@ class QualityGateTest {
         assertDoesNotThrow(mojo::execute);
         assertTrue(exitSink.isEmpty(), "a disabled gate must never trigger the exit");
     }
+
+    @Test
+    void gateViolationThrowsInsteadOfExitingInReactorSafeMode() throws Exception {
+        // exitProcessOnGateFailure=false: the gate throws MojoFailureException
+        // (Maven exit code 1, reactor honors --fail-at-end) and never touches
+        // System.exit — the multi-module escape hatch for the WP-19 exit code.
+        java.util.List<Integer> exitSink = new java.util.ArrayList<>();
+        MutateMojo mojo = mojoWithLoopResult(resultWithScore(50.0), 80.0, exitSink);
+        mojo.setExitProcessOnGateFailure(false);
+
+        org.apache.maven.plugin.MojoFailureException thrown =
+                org.junit.jupiter.api.Assertions.assertThrows(
+                        org.apache.maven.plugin.MojoFailureException.class, mojo::execute);
+        assertTrue(thrown.getMessage().contains("80.0"),
+                "the failure must name the breached threshold");
+        assertTrue(exitSink.isEmpty(),
+                "reactor-safe mode must fail via MojoFailureException, never System.exit");
+    }
+
+    @Test
+    void populationGateAlsoThrowsInReactorSafeMode() throws Exception {
+        // The WP-24 ERRORED population gate follows the same delivery mode.
+        MutationLoopCoordinator.MutationLoopResult errored =
+                new MutationLoopCoordinator.MutationLoopResult(
+                        2, 0, 0, 0, 1, 0, 0.0, tempDir.resolve("mutation-report.json").toString());
+        java.util.List<Integer> exitSink = new java.util.ArrayList<>();
+        MutateMojo mojo = mojoWithLoopResult(errored, 0.0, exitSink);
+        mojo.setExitProcessOnGateFailure(false);
+
+        org.junit.jupiter.api.Assertions.assertThrows(
+                org.apache.maven.plugin.MojoFailureException.class, mojo::execute);
+        assertTrue(exitSink.isEmpty(),
+                "reactor-safe mode must fail via MojoFailureException, never System.exit");
+    }
 }

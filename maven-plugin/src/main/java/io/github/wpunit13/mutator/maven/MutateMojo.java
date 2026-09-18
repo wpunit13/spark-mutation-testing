@@ -43,7 +43,9 @@ import java.util.List;
  * terminates the whole Maven JVM deliberately; in a multi-module reactor the
  * remaining modules do not build. That is the accepted cost of a distinguishable
  * governance exit code (a thrown {@code MojoFailureException} would be reported by
- * Maven as exit code 1, indistinguishable from any other build failure).
+ * Maven as exit code 1, indistinguishable from any other build failure). Set
+ * {@code -Dspark.mutator.exitProcessOnGateFailure=false} to trade the dedicated
+ * exit code for reactor-friendly failure semantics (see that parameter).
  */
 @Mojo(
         name = "mutate",
@@ -121,6 +123,28 @@ public class MutateMojo extends AbstractMojo {
     @Parameter(property = "spark.mutator.excludedMutators")
     private List<String> excludedMutators = new ArrayList<>();
 
+    /**
+     * Gate-failure delivery (WP-19 follow-up). Default {@code true}: a gate
+     * violation terminates the Maven JVM with the dedicated governance-gate
+     * exit code 2. Set {@code false} for multi-module reactors: the gate throws
+     * {@link MojoFailureException} instead — the build still fails (Maven exit
+     * code 1), but the reactor honors {@code --fail-at-end} / {@code --fail-never}
+     * so remaining modules still build. Reports are flushed to disk either way;
+     * pair {@code false} with {@code --fail-at-end} for full-reactor runs.
+     */
+    @Parameter(property = "spark.mutator.exitProcessOnGateFailure", defaultValue = "true")
+    private boolean exitProcessOnGateFailure = true;
+
+    /**
+     * Injects Spark's mandatory modular-runtime JVM args (the {@code --add-opens}
+     * set plus Netty/reflect flags, see {@link SurefireConfigurator#SPARK_JVM_OPEN_ARGS})
+     * into Surefire's {@code argLine} alongside the extension property. Default
+     * {@code true}; nothing is injected on Java 8. Disable only if the fork JDK
+     * is managed by other means (e.g. Maven toolchains).
+     */
+    @Parameter(property = "spark.mutator.injectAddOpens", defaultValue = "true")
+    private boolean injectAddOpens = true;
+
     private MutationLoopCoordinator coordinator;
     private SurefireExecutor surefireExecutor;
 
@@ -143,7 +167,7 @@ public class MutateMojo extends AbstractMojo {
         getLog().info("Resolved interceptor JAR: " + interceptorJar.getAbsolutePath());
 
         // 3. Configure Surefire
-        SurefireConfigurator surefireConfigurator = new SurefireConfigurator();
+        SurefireConfigurator surefireConfigurator = new SurefireConfigurator(injectAddOpens);
         SurefireConfigurator.SurefireConfigResult configResult =
                 surefireConfigurator.configure(project, interceptorJar);
 
@@ -258,7 +282,8 @@ public class MutateMojo extends AbstractMojo {
      * logging the failure. See the class javadoc for the JVM-termination
      * tradeoff.
      */
-    private void enforceQualityGate(MutationLoopCoordinator.MutationLoopResult loopResult) {
+    private void enforceQualityGate(MutationLoopCoordinator.MutationLoopResult loopResult)
+            throws MojoFailureException {
         // WP-24 population gates first: real-failure ERRORED is zero-tolerance
         // (a dead session or shim violation means the harness/engine is broken);
         // the designed not-applied population is ratio-gated (complex plans
@@ -272,15 +297,29 @@ public class MutateMojo extends AbstractMojo {
                 maxNotAppliedRatio);
         if (!populationViolations.isEmpty()) {
             populationViolations.forEach(getLog()::error);
-            getLog().error("Reports are on disk at: " + loopResult.getReportPath());
-            exitWithGateFailure(GATE_FAILURE_EXIT_CODE);
+            failGate(loopResult, String.join("; ", populationViolations));
         }
         if (minMutationScore > 0.0 && loopResult.getMutationScore() < minMutationScore) {
-            getLog().error("Quality gate FAILED: mutation score (" + loopResult.getMutationScore()
-                    + "%) is below minimum threshold (" + minMutationScore + "%).");
-            getLog().error("Reports are on disk at: " + loopResult.getReportPath());
-            exitWithGateFailure(GATE_FAILURE_EXIT_CODE);
+            String message = "Quality gate FAILED: mutation score (" + loopResult.getMutationScore()
+                    + "%) is below minimum threshold (" + minMutationScore + "%).";
+            getLog().error(message);
+            failGate(loopResult, message);
         }
+    }
+
+    /**
+     * Delivers a gate violation per {@code exitProcessOnGateFailure}: the
+     * dedicated exit code 2 (WP-19 default), or a {@link MojoFailureException}
+     * for reactor-friendly multi-module builds.
+     */
+    private void failGate(MutationLoopCoordinator.MutationLoopResult loopResult, String message)
+            throws MojoFailureException {
+        getLog().error("Reports are on disk at: " + loopResult.getReportPath());
+        if (exitProcessOnGateFailure) {
+            exitWithGateFailure(GATE_FAILURE_EXIT_CODE);
+            return; // not reached in production
+        }
+        throw new MojoFailureException(message);
     }
 
     /**
@@ -339,6 +378,14 @@ public class MutateMojo extends AbstractMojo {
 
     void setExcludedMutators(List<String> excludedMutators) {
         this.excludedMutators = excludedMutators;
+    }
+
+    void setExitProcessOnGateFailure(boolean exitProcessOnGateFailure) {
+        this.exitProcessOnGateFailure = exitProcessOnGateFailure;
+    }
+
+    void setInjectAddOpens(boolean injectAddOpens) {
+        this.injectAddOpens = injectAddOpens;
     }
 
     void setCoordinator(MutationLoopCoordinator coordinator) {
