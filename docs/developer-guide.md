@@ -449,7 +449,6 @@ as the per-mutant `-Dtest=` filter.
 > **WP-26 (planned):** these three obligations are scheduled to move into
 > `MutatorSparkExtension` itself (config-activated, shutdown-hook handoff),
 > which makes the Maven plugin path pom-only — no harness glue, no annotation.
-> Spec: [`prompts_execution/packets-phase-3/WP-26.md`](../prompts_execution/packets-phase-3/WP-26.md).
 > Until then, any JUnit 5 suite gets them for free via
 > `@EnableSparkMutationTesting`; other frameworks implement them per §7.
 
@@ -479,8 +478,6 @@ its planned discovery runner (`org.scalatest.junit.JUnitRunner`) does not exist
 in the managed ScalaTest 3.2.18 — status, evidence, and the resume plan live in
 [`SCALA_PIPELINES.md`](SCALA_PIPELINES.md). WP-17 tightens discovery to a
 single plan shape and adds the applied-mutation honesty guard. WP-25 (in-process
-per-mutant watchdog) and WP-26 (zero-touch fork path, pitest parity) are
-designed-but-unimplemented work packets:
-[`prompts_execution/packets-phase-3/WP-25.md`](../prompts_execution/packets-phase-3/WP-25.md)
-and
-[`prompts_execution/packets-phase-3/WP-26.md`](../prompts_execution/packets-phase-3/WP-26.md).
+per-mutant watchdog), WP-26 (zero-touch fork path, pitest parity), and WP-27
+(`Decimal → Double` type-downgrade mutator) are designed-but-unimplemented
+future work.

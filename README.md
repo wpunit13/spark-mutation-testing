@@ -104,8 +104,7 @@ class MyPipelineTest { /* existing tests unchanged */ }
   on your `AbstractSparkTest` once and every subclass is covered.
 - **No base class?** Annotate each Spark-touching test class — one line each,
   mechanical. Non-Spark classes need nothing. (WP-26, planned, removes the
-  requirement entirely for the Maven plugin path —
-  [`prompts_execution/packets-phase-3/WP-26.md`](prompts_execution/packets-phase-3/WP-26.md).)
+  requirement entirely for the Maven plugin path.)
 - **Maven plugin path (`mutate`, CI).** At least one annotated class must
   execute in each run: the extension is the fork-side bridge that hands
   `catalog.json` and the applied markers back to the Mojo. **Zero annotated

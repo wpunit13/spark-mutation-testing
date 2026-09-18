@@ -70,8 +70,7 @@ flowchart TD
 > **Planned topology change (WP-26):** the fork-side harness glue (mutant
 > activation, catalog/marker handoff) moves from `mutator-junit5` into
 > `MutatorSparkExtension` (config-activated, shutdown-hook handoff), making
-> the Maven plugin path pom-only —
-> [`prompts_execution/packets-phase-3/WP-26.md`](../prompts_execution/packets-phase-3/WP-26.md).
+> the Maven plugin path pom-only.
 
 **Dependency direction is strictly one-way and acyclic:**
 `mutator-core` → nothing Spark-specific. `interceptor-api` → minimal Catalyst
@@ -618,8 +617,8 @@ partition) would not actually stop.
 > (`python/pytest_spark_mutator/watchdog.py`, `escalate_cancellation`). The
 > Maven fork path enforces the deadline by killing the Surefire fork
 > (`SurefireExecutor`). The **JVM in-process path (JUnit 5 extension /
-> Gradle) has no watchdog today** — designed as WP-25:
-> [`prompts_execution/packets-phase-3/WP-25.md`](../prompts_execution/packets-phase-3/WP-25.md).
+> Gradle) has no watchdog today** — designed as WP-25 (in-process per-mutant
+> watchdog).
 
 | Stage | Trigger | Action | Resulting classification |
 |---|---|---|---|

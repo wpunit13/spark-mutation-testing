@@ -10,8 +10,7 @@
 > (WP-21), and the Spark 3.5 (Scala 2.12/2.13) + 4.2 (2.13) shims. Still
 > planned: the N-2 Spark window (4.1/4.0), first-class ScalaTest support
 > (WP-18, deferred), the in-process watchdog (WP-25), and the zero-touch fork
-> path (WP-26) — packets under
-> [`prompts_execution/packets-phase-3/`](../prompts_execution/packets-phase-3/).
+> path (WP-26) — tracked as local work packets, planned.
 
 ## 1. Overview & Problem Statement
 Traditional mutation testing tools (like PIT) operate on JVM bytecode and cannot evaluate distributed query semantics, while standard test suites often pass despite lacking coverage for join edge cases, filter drops, or window boundary changes. 
@@ -41,8 +40,7 @@ expose.
     * **Python (PySpark):** `pytest` plugin registered via standard package entry points.
   * *Current state:* true end-to-end for PySpark; the JVM fork path still
     requires one `@EnableSparkMutationTesting`-annotated class (the harness
-    glue) until WP-26 absorbs it into the engine — see
-    [`prompts_execution/packets-phase-3/WP-26.md`](../prompts_execution/packets-phase-3/WP-26.md).
+    glue) until WP-26 absorbs it into the engine (planned).
 * **Plan-Level Semantic Mutation:** 
   * Mutations target the Catalyst Logical Plan and DataFrame AST rather than low-level bytecode or raw strings.
 * **Isolation Between Mutants:** 
@@ -78,7 +76,7 @@ expose.
 
 Shipped status (verified against the shims): every row above is implemented
 except the **`Decimal → Double` type downgrade**, which remains spec-only —
-tracked as [WP-27](../prompts_execution/packets-phase-3/WP-27.md). The null
+tracked as WP-27 (planned). The null
 mutators ship under the Project operator (`COALESCE_BYPASS` index 0,
 `INJECT_NULL` index 1). Aggregation ships a third mutation beyond this table:
 zero-out of an aggregate expression to its type's default (`Literal.default`,
@@ -151,8 +149,7 @@ spark-mutator/
 │   ├── spark-gradle-junit5/
 │   └── pyspark-pipeline/
 ├── scripts/                             # Frozen e2e verification (verify_e2e*.py)
-├── docs/                                # Architecture, contracts, guides, work packets
-└── prompts_execution/                   # Agent work-packet bundles (WP-NN.md)
+└── docs/                                # Architecture, contracts, guides
 ```
 
 ### Module Responsibilities
