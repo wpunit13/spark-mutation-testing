@@ -22,7 +22,7 @@ loop* and *where it runs*.
 | Orchestrator | `MutateMojo` + `MutationLoopCoordinator` (in the Maven JVM) | `SparkMutatorExtension` (in the test JVM) |
 | Test runner | Surefire forks one JVM per mutant | JUnit 5 runs tests reflectively in-process |
 | Isolation | Process-level (fresh JVM per mutant) | In-process, cache-reset between mutants |
-| Use case | CI / enterprise gate; can parallelize | IDE, quick feedback, zero-plugin `mvn test` |
+| Use case | CI / enterprise gate; **sequential today** — parallel fork execution is planned (WP-28) | IDE, quick feedback, zero-plugin `mvn test` |
 
 ### 1.1 Maven plugin path
 
@@ -86,6 +86,77 @@ including Gradle's `test` task (thin path, no plugin):
 > mandatory `--add-opens` set (the canonical list is the root POM's
 > `spark.test.jvm.args`, reproduced in [`GRADLE.md`](GRADLE.md) §3) — without
 > it the driver dies with `InaccessibleObjectException` before any test runs.
+
+### 1.3 Runtime sizing (plan before you run)
+
+Wall-clock for the fork loop decomposes into three additive parts:
+
+```
+T ≈ T_baseline
+  + M × S_fork                                  // per-mutant fork startup
+  + Σ per-mutant test execution                 // see mix below
+```
+
+- `M` = catalogued mutants, `S_fork` = JVM + SparkSession startup per fork
+  (measure once on your box; 30–60 s is typical for `local[1]`).
+- Per-mutant deadline = `ceil(T_baseline × timeoutMultiplier)`; a `TIMED_OUT`
+  mutant costs the *full* deadline, a `SURVIVED` one costs its mapped tests'
+  runtime, a `KILLED` one usually dies fast (fail-fast).
+
+**Worked example.** Suite baseline 4 min, 40 mutants, multiplier 2.0
+(deadline 8 min), fork startup 45 s, mix 60% killed / 30% survived / 10%
+timed-out:
+
+```
+T_baseline                    4 min
+fork startup   40 × 45s      ≈ 30 min
+killed   24 × ~1 min          ≈ 18 min
+survived 12 × ~2.5 min        ≈ 30 min
+timed out  4 × 8 min          ≈ 32 min
+                              ─────────
+realistic                     ≈ 1 h 50 min
+hard upper bound (every mutant hits its deadline): 4 + 40×8 ≈ 5.4 h
+```
+
+Planning rules of thumb:
+
+1. **Pilot first.** Run the loop once on a small module or with
+   `-Dspark.mutator.excludedMutators=WINDOW,OTHER` to measure `S_fork` and the
+   kill/survive mix before budgeting a full run.
+2. **The in-process path has no fork startup** (`mvn test` reuses the
+   session) — for local iteration on large catalogs it is the fast loop; the
+   fork loop is the CI-grade one. Per-mutant deadlines are enforced here too
+   since WP-25: a hung mutant is classified `TIMED_OUT` and the loop
+   continues (§6.2).
+3. **Shrink the catalog, not the deadline.** `excludedMutators` removes whole
+   families; lowering `timeoutMultiplier` below 2.0 risks flaky `TIMED_OUT`
+   verdicts on legitimately slow mutants.
+4. Parallel fork execution is the designed answer to large catalogs —
+   planned as WP-28 (sequential today).
+
+### 1.4 Flaky baselines
+
+Contract: **any baseline failure aborts the entire run.** This is deliberate —
+a red baseline makes every subsequent classification meaningless (the score
+would measure the baseline bug, not the suite). There is no retry.
+
+Operational guidance when it bites:
+
+1. **Treat the flake as the finding.** A test that intermittently fails also
+   intermittently *passes* — under mutation, that same test flips verdicts
+   between runs and destroys the deterministic-id reproducibility the report
+   depends on. Fix it or quarantine it before mutation runs, not after.
+2. **Quarantine via Surefire** — `<excludes>` or a profile, the same
+   mechanism the weak/hardened example profiles use. Quarantined tests simply
+   don't run; mutants they would have killed are honestly `SURVIVED` in the
+   report.
+3. **Nondeterministic assertions are flakes in waiting** — sort collections
+   before comparing, assert floating point with tolerance, never assert on
+   wall-clock or row *order* without an explicit `orderBy`.
+
+Retry-on-flake is a deliberate non-feature: a mutant whose mapped tests
+sometimes fail and sometimes pass is not a verdict, it is a test bug — a
+retry would launder it into whichever outcome the gate prefers.
 
 ---
 
@@ -477,7 +548,13 @@ The ScalaTest bridge is specified as WP-18 (`mutator-scalatest`) but deferred:
 its planned discovery runner (`org.scalatest.junit.JUnitRunner`) does not exist
 in the managed ScalaTest 3.2.18 — status, evidence, and the resume plan live in
 [`SCALA_PIPELINES.md`](SCALA_PIPELINES.md). WP-17 tightens discovery to a
-single plan shape and adds the applied-mutation honesty guard. WP-25 (in-process
-per-mutant watchdog), WP-26 (zero-touch fork path, pitest parity), and WP-27
-(`Decimal → Double` type-downgrade mutator) are designed-but-unimplemented
-future work.
+single plan shape and adds the applied-mutation honesty guard. WP-26
+(zero-touch fork path, pitest parity), WP-27
+(`Decimal → Double` type-downgrade mutator), and WP-28 (mutation-loop
+performance: measure first, then parallelize or shard) are
+designed-but-unimplemented future work. WP-25 (in-process per-mutant
+watchdog) shipped: the JUnit 5 standalone loop enforces
+`ceil(baseline × timeoutMultiplier)` per mutant with a cancel + interrupt
+escalation ladder, classifies deadline hits as `TIMED_OUT`, and abandons to
+a flushed partial report when a re-run thread ignores both channels
+(reports record `config.timeoutEnforced: true`).
