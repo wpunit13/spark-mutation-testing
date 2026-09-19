@@ -7,9 +7,10 @@
 > written: the aggregate/window/null mutators, the Java/Scala Maven path, the
 > JVM config parity + plan diffs + governance gates (WP-19/WP-24, including
 > the dedicated exit code and the `NOT_APPLIED` split), the Gradle thin path
-> (WP-21), and the Spark 3.5 (Scala 2.12/2.13) + 4.2 (2.13) shims. Still
+> (WP-21), the Spark 3.5 (Scala 2.12/2.13) + 4.2 (2.13) shims, and the
+> in-process per-mutant watchdog (WP-25). Still
 > planned: the N-2 Spark window (4.1/4.0), first-class ScalaTest support
-> (WP-18, deferred), the in-process watchdog (WP-25), and the zero-touch fork
+> (WP-18, deferred), and the zero-touch fork
 > path (WP-26) — tracked as local work packets, planned.
 
 ## 1. Overview & Problem Statement

@@ -617,8 +617,12 @@ partition) would not actually stop.
 > (`python/pytest_spark_mutator/watchdog.py`, `escalate_cancellation`). The
 > Maven fork path enforces the deadline by killing the Surefire fork
 > (`SurefireExecutor`). The **JVM in-process path (JUnit 5 extension /
-> Gradle) has no watchdog today** — designed as WP-25 (in-process per-mutant
-> watchdog).
+> Gradle) enforces the deadline since WP-25**
+> (`SparkMutatorExtension`): the re-run executes on a daemon worker thread
+> while the loop thread waits with the deadline, then escalates
+> `cancelAllJobs` → interrupt; a worker that survives both channels trips
+> the in-process analog of the stage-3 breaker — abandon the loop, flush
+> the partial report, fail the run (never `System.exit`, WP-19).
 
 | Stage | Trigger | Action | Resulting classification |
 |---|---|---|---|
