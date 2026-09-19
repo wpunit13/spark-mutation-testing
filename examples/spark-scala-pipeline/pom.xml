@@ -43,15 +43,6 @@
       docs/TEST_STRATEGY.md.)
     -->
     <bundle.artifact>interceptor-bundle-spark-3.5_2.13</bundle.artifact>
-    <!--
-      WP-24 governance knob. This pipeline's designed not-applied population
-      is 10/34 ≈ 29.4% (cache-hidden / plan-eliminated shapes that never
-      reach execution). 0.35 leaves headroom for cross-combo Catalyst plan
-      drift (1 mutant ≈ 2.9%) while still failing on a discovery regression
-      that hides materially more mutants. Raised from the 0.20 default when
-      the WP-24 gate first ran against this example.
-    -->
-    <spark.mutator.maxNotAppliedRatio>0.35</spark.mutator.maxNotAppliedRatio>
   </properties>
 
   <name>spark-scala-pipeline</name>
