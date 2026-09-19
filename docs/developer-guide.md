@@ -46,11 +46,14 @@ does four things on `mvn spark-mutation-testing:mutate`:
 4. **Run the mutation loop** (`MutationLoopCoordinator`): baseline → discover →
    fork-per-mutant → classify → merge → report → gate.
 
-> **At least one annotated class must run in each fork.** The
+> **At least one annotated class must run in each fork** — unless the engine-side
+> handoff is active, which is the default since WP-26: `MutatorSparkExtension`
+> (injected into `argLine` by the plugin itself) performs all three §7
+> obligations, so a pom-only setup needs **no annotation at all**. The
 > `SparkMutatorExtension` bridge (via `@EnableSparkMutationTesting`, a shared
-> base class, or equivalent registration) is what writes `catalog.json` on
-> baseline completion and the applied markers on mutant runs. If no annotated
-> class executes, the baseline fork hands back an empty catalog and the Mojo
+> base class, or equivalent registration) remains as an idempotent co-writer
+> when present. If neither runs — e.g. no Spark session is ever created in the
+> fork — the baseline fork hands back an empty catalog and the Mojo
 > writes a **silent empty report** (zero mutants, score 0.0%, exit 0) — check
 > the `Detected …` / mutant-count log lines to confirm discovery actually ran.
 
@@ -512,16 +515,24 @@ custom runner) implements the same contract against public `mutator-core` APIs:
 | 2 | After all tests ran | `baseline` | `MutationCatalogIo.writeCatalogJson(outputDir, MutationCatalogAccess.allEntries())` — the baseline fork hands Discovery's catalog to the coordinator. |
 | 3 | After all tests ran | `mutant` | If `AppliedMutantTracker.lastOrNull() == activeMutant`, write `AppliedMarkerStore.write(outputDir, activeMutant)`; otherwise throw. A mutation that never executed must never be classified KILLED or SURVIVED. |
 
+**Resolved by WP-26 for the fork path:** when the fork is driven by the Maven
+plugin, `MutatorSparkExtension` performs all three obligations itself
+(activation at session-extension init, `catalog.json` / applied markers from
+the `ForkHandoffShutdownHook` at JVM exit) — the table above then only applies
+to harnesses that must coexist with engines older than WP-26, or to frameworks
+whose fork also runs the standalone in-process loop.
+
 `outputDir` is `MutantBootstrap.outputDirectoryOrNull()`. Optional:
 `TestContextTracker.setCurrentTestId(...)` / `clearCurrentTestId()` around each
 test enables test-impact mapping (`mappedTestIds`), which the coordinator uses
 as the per-mutant `-Dtest=` filter.
 
-> **WP-26 (planned):** these three obligations are scheduled to move into
-> `MutatorSparkExtension` itself (config-activated, shutdown-hook handoff),
-> which makes the Maven plugin path pom-only — no harness glue, no annotation.
-> Until then, any JUnit 5 suite gets them for free via
-> `@EnableSparkMutationTesting`; other frameworks implement them per §7.
+> **WP-26 (implemented):** these three obligations moved into
+> `MutatorSparkExtension` (config-activated, shutdown-hook handoff), making the
+> Maven plugin path pom-only — no harness glue, no annotation. The JUnit 5
+> bridge stays for the standalone in-process loop and co-writes the same files
+> idempotently when an annotated class runs; other frameworks can still
+> implement the contract per §7.
 
 Failing loudly is part of the contract. A harness that swallows an unknown-
 mutant error or skips the marker turns a broken handoff into "every mutant

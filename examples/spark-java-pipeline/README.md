@@ -61,7 +61,13 @@ from the test classpath, resolves the matching interceptor, and injects the
 Spark extension plus the mandatory Java 17+ JVM opens (`--add-opens` set) into
 Surefire's `argLine` itself.
 
-### c) The annotation on your existing test class
+### c) The annotation on your existing test class — optional
+
+**The Maven plugin path needs no test-code change at all** (WP-26):
+`MutatorSparkExtension` performs the fork handoff itself, so
+`mvn test-compile spark-mutation-testing:mutate` is pom-only, pitest-style.
+Annotate only for the in-process loop (`mvn test` driving the full mutation
+loop inside the test JVM):
 
 ```java
 import io.github.wpunit13.mutator.junit5.EnableSparkMutationTesting;
@@ -70,12 +76,17 @@ import io.github.wpunit13.mutator.junit5.EnableSparkMutationTesting;
 class OrdersPipelineHardenedTest { /* your existing tests, unchanged */ }
 ```
 
+These suites ship without the annotation: `mutate` runs zero-touch, and the
+annotated form produces identical verdicts (the bridge co-writes the same
+handoff files idempotently).
+
 ---
 
 ## 2. Commands
 
 ```bash
-mvn test                        # in-process loop; both suites run
+mvn test                        # plain functional run (no mutation loop — the
+                                # suites carry no annotation; see §1c)
                                 # add -Dspark.mutator.disabled=true for a pure
                                 # baseline run without the mutation loop
 
