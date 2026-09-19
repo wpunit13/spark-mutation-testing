@@ -234,8 +234,10 @@ public class MutationLoopCoordinator {
 
     /** The config echo this run was orchestrated with (report §5.3 config block). */
     private ReportWriter.Config reportConfig() {
+        // The fork path always enforces the per-mutant deadline (fork kill on
+        // expiry), so its config echo records timeoutEnforced = true.
         return new ReportWriter.Config(
-                targetModules, excludedMutators, timeoutMultiplier, minMutationScore);
+                targetModules, excludedMutators, timeoutMultiplier, minMutationScore, true);
     }
 
     /**

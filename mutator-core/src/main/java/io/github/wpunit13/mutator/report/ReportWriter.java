@@ -33,6 +33,14 @@ public final class ReportWriter {
     private static final String PROP_TIMEOUT_MULTIPLIER = "spark.mutator.timeoutMultiplier";
     private static final String PROP_MIN_MUTATION_SCORE = "spark.mutator.minMutationScore";
 
+    /**
+     * WP-25: set to {@code true} by every orchestration surface that enforces
+     * a per-mutant deadline (Maven fork kill, PySpark watchdog, JUnit 5
+     * in-process watchdog) so the report's config echo distinguishes enforced
+     * deadlines from the pre-WP-25 echo-only era.
+     */
+    private static final String PROP_TIMEOUT_ENFORCED = "spark.mutator.timeoutEnforced";
+
     /** WP-24 governance-gate knobs (one key, both surfaces). */
     public static final String PROP_MAX_ERRORED_COUNT = "spark.mutator.maxErroredCount";
     public static final String PROP_MAX_NOT_APPLIED_RATIO = "spark.mutator.maxNotAppliedRatio";
@@ -59,16 +67,19 @@ public final class ReportWriter {
         private final List<String> excludedMutators;
         private final double timeoutMultiplier;
         private final double minMutationScore;
+        private final boolean timeoutEnforced;
 
         public Config(
                 List<String> targetModules,
                 List<String> excludedMutators,
                 double timeoutMultiplier,
-                double minMutationScore) {
+                double minMutationScore,
+                boolean timeoutEnforced) {
             this.targetModules = targetModules == null ? List.of() : List.copyOf(targetModules);
             this.excludedMutators = excludedMutators == null ? List.of() : List.copyOf(excludedMutators);
             this.timeoutMultiplier = timeoutMultiplier;
             this.minMutationScore = minMutationScore;
+            this.timeoutEnforced = timeoutEnforced;
         }
 
         /**
@@ -85,7 +96,8 @@ public final class ReportWriter {
                     splitCsv(System.getProperty(PROP_TARGET_MODULES)),
                     splitCsv(System.getProperty(PROP_EXCLUDED_MUTATORS)),
                     parseDouble(System.getProperty(PROP_TIMEOUT_MULTIPLIER), 2.0),
-                    parseDouble(System.getProperty(PROP_MIN_MUTATION_SCORE), 0.0));
+                    parseDouble(System.getProperty(PROP_MIN_MUTATION_SCORE), 0.0),
+                    Boolean.parseBoolean(System.getProperty(PROP_TIMEOUT_ENFORCED, "false")));
         }
 
         private static List<String> splitCsv(String value) {
@@ -123,6 +135,10 @@ public final class ReportWriter {
 
         public double getMinMutationScore() {
             return minMutationScore;
+        }
+
+        public boolean isTimeoutEnforced() {
+            return timeoutEnforced;
         }
     }
 

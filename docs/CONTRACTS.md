@@ -515,7 +515,8 @@ Mutation Score denominator and governed by
     "targetModules": ["my_pipeline.transforms"],
     "excludedMutators": ["CrossJoinMutator"],
     "timeoutMultiplier": 2.0,
-    "minMutationScore": 80.0
+    "minMutationScore": 80.0,
+    "timeoutEnforced": true
   },
   "summary": {
     "totalMutants": 0,
@@ -576,6 +577,12 @@ Mutation Score denominator and governed by
   characters (`ARCHITECTURE.md` §4.2/§4.4); any other length/casing is a
   contract violation to be caught by report-writer validation, not silently
   accepted.
+- `config.timeoutEnforced` (WP-25, additive) is `true` when the run enforced
+  a per-mutant deadline (Maven fork kill, PySpark watchdog, JUnit 5
+  in-process watchdog) and `false` for the pre-WP-25 echo-only era — the
+  JUnit 5 in-process path before its watchdog shipped. Consumers key on it
+  to interpret `TIMED_OUT` counts: a `false` report cannot contain
+  `TIMED_OUT` outcomes.
 
 ### 5.4 SARIF Output
 

@@ -82,6 +82,9 @@ _PROP_TIMEOUT_MULTIPLIER = "spark.mutator.timeoutMultiplier"
 _PROP_MIN_MUTATION_SCORE = "spark.mutator.minMutationScore"
 _PROP_MAX_ERRORED_COUNT = "spark.mutator.maxErroredCount"
 _PROP_MAX_NOT_APPLIED_RATIO = "spark.mutator.maxNotAppliedRatio"
+# WP-25: the Python loop always enforces the per-mutant deadline, so the
+# report's config echo records timeoutEnforced = true (schema §5.3).
+_PROP_TIMEOUT_ENFORCED = "spark.mutator.timeoutEnforced"
 
 # Stash key under which the active _MutationSession is stored on the pytest
 # config; the single source of truth for "is the plugin active".
@@ -407,6 +410,7 @@ class _MutationSession:
         system.setProperty(_PROP_MIN_MUTATION_SCORE, str(self.config.min_mutation_score))
         system.setProperty(_PROP_MAX_ERRORED_COUNT, str(self.config.max_errored_count))
         system.setProperty(_PROP_MAX_NOT_APPLIED_RATIO, str(self.config.max_not_applied_ratio))
+        system.setProperty(_PROP_TIMEOUT_ENFORCED, "true")
         self._engine_config_applied = True
 
     def _set_file_path_hint(self, nodeid: str) -> None:

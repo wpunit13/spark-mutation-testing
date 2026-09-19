@@ -98,6 +98,9 @@ public final class JsonReportWriter {
         runConfig.getExcludedMutators().forEach(excludedMutators::add);
         config.put("timeoutMultiplier", runConfig.getTimeoutMultiplier());
         config.put("minMutationScore", runConfig.getMinMutationScore());
+        // WP-25: additive marker (schema §5.3) distinguishing enforced-deadline
+        // reports from the pre-WP-25 echo-only era.
+        config.put("timeoutEnforced", runConfig.isTimeoutEnforced());
 
         ObjectNode summary = root.putObject("summary");
         summary.put("totalMutants", catalog.size());
