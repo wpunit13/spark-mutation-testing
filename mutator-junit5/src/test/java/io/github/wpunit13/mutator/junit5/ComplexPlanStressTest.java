@@ -439,6 +439,8 @@ class ComplexPlanStressTest {
         assertTrue(killed > 0, "[" + leg + "] Hardened branch must kill mutants:\n" + dump);
         assertTrue(survived > 0, "[" + leg + "] Weak branch must let mutants survive:\n" + dump);
 
+        assertFamilyCoverage(report, leg);
+
         // Every applied mutant carries attribution evidence.
         for (JsonNode m : report.get("mutants")) {
             if (!m.get("result").get("status").asText().equals("ERRORED")) {
@@ -447,6 +449,65 @@ class ComplexPlanStressTest {
                                 + " must carry a diff snippet");
             }
         }
+    }
+
+    /**
+     * Family-level pins: every mutator family must be discovered AND
+     * classified on the complex plan — not just the FILTER attribution
+     * instrument. Expectations are designed from the pipeline shape
+     * ({@code runPipeline} javadoc), not from whatever the current run
+     * happens to produce.
+     */
+    private void assertFamilyCoverage(JsonNode report, String leg) {
+        Map<String, List<String>> byFamily = new LinkedHashMap<>();
+        for (JsonNode m : report.get("mutants")) {
+            byFamily.computeIfAbsent(m.get("operatorType").asText(), k -> new ArrayList<>())
+                    .add(m.get("result").get("status").asText());
+        }
+
+        // JOIN: LEFT mutants are semantically equivalent on this pipeline
+        // (srcC covers every grp; every srcB id is cached) → designed
+        // SURVIVED; CROSS/ANTI change rows → KILLED; ANTI on the write join
+        // drops valB → designed schema ERRORED (guarded globally above).
+        assertFamilyStatuses(byFamily, "JOIN", leg,
+                "must include KILLED and SURVIVED, never NOT_APPLIED",
+                s -> s.contains("KILLED") && s.contains("SURVIVED") && !s.contains("NOT_APPLIED"));
+
+        // WINDOW: rn ≤ 3 never binds (2 rows per grp), so order/frame
+        // mutations are unobservable → SURVIVED, or NOT_APPLIED (frame
+        // truncation on row_number). Must never schema-crash.
+        assertFamilyStatuses(byFamily, "WINDOW", leg,
+                "must include SURVIVED, never ERRORED",
+                s -> s.contains("SURVIVED") && !s.contains("ERRORED"));
+
+        // AGGREGATE: sum mutations change the exact-totals assert → KILLED.
+        assertFamilyStatuses(byFamily, "AGGREGATE", leg,
+                "must include KILLED",
+                s -> s.contains("KILLED"));
+
+        // PROJECT: INJECT_NULL on the cached branch changes totals → KILLED;
+        // on the weak branch the count is invariant → SURVIVED.
+        assertFamilyStatuses(byFamily, "PROJECT", leg,
+                "must include KILLED and SURVIVED",
+                s -> s.contains("KILLED") && s.contains("SURVIVED"));
+
+        // FILTER: both branches designed (see the attribution instrument).
+        assertFamilyStatuses(byFamily, "FILTER", leg,
+                "must include KILLED and SURVIVED",
+                s -> s.contains("KILLED") && s.contains("SURVIVED"));
+    }
+
+    private static void assertFamilyStatuses(
+            Map<String, List<String>> byFamily,
+            String family,
+            String leg,
+            String expectation,
+            java.util.function.Predicate<List<String>> pin) {
+        List<String> statuses = byFamily.get(family);
+        assertNotNull(statuses,
+                "[" + leg + "] " + family + " mutants must be discovered on the complex plan");
+        assertTrue(pin.test(statuses),
+                "[" + leg + "] " + family + " " + expectation + " but was: " + statuses);
     }
 
     private Map<String, String> statusMap(JsonNode report) {
