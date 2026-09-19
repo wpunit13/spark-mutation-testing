@@ -22,6 +22,10 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.FutureTask;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
@@ -62,7 +66,17 @@ public class SparkMutatorExtension implements
     private static final String SPARK_SQL_EXTENSIONS = "spark.sql.extensions";
     private static final String KEY_TEST_START_TIME = "testStartTime";
     private static final String KEY_HANDLED_FAILURE = "handledFailure";
+    private static final String KEY_BASELINE_START = "baselineStartTime";
     private static final String STATUS_ERRORED = "ERRORED";
+    private static final String PROP_TIMEOUT_MULTIPLIER = "spark.mutator.timeoutMultiplier";
+    private static final String PROP_TIMEOUT_ENFORCED = "spark.mutator.timeoutEnforced";
+
+    /**
+     * Grace period per escalation channel (docs/ARCHITECTURE.md §6.2 ladder,
+     * same defaults as the PySpark watchdog). Package-private mutable only so
+     * tests can shrink it; production code must not write it.
+     */
+    static volatile long watchdogGraceMillis = 5_000L;
 
     private static final ExtensionContext.Namespace NAMESPACE =
             ExtensionContext.Namespace.create(SparkMutatorExtension.class);
@@ -98,24 +112,27 @@ public class SparkMutatorExtension implements
      */
     public static void cleanCatalystCache() {
         try {
-            Class<?> sparkSessionClass = Class.forName("org.apache.spark.sql.SparkSession");
-            Object opt = sparkSessionClass.getMethod("getActiveSession").invoke(null);
-            Method isDefined = opt.getClass().getMethod("isDefined");
-            Object spark = null;
-            if ((boolean) isDefined.invoke(opt)) {
-                spark = opt.getClass().getMethod("get").invoke(opt);
-            } else {
-                Object defaultOpt = sparkSessionClass.getMethod("getDefaultSession").invoke(null);
-                if ((boolean) isDefined.invoke(defaultOpt)) {
-                    spark = defaultOpt.getClass().getMethod("get").invoke(defaultOpt);
-                }
-            }
+            Object spark = activeOrDefaultSessionOrNull();
             if (spark != null) {
                 SessionResetFacade.resetSessionState(spark, 0L);
             }
         } catch (Throwable ignored) {
             // Spark may not be present or no active session; safely continue
         }
+    }
+
+    private static Object activeOrDefaultSessionOrNull() throws Exception {
+        Class<?> sparkSessionClass = Class.forName("org.apache.spark.sql.SparkSession");
+        Object opt = sparkSessionClass.getMethod("getActiveSession").invoke(null);
+        Method isDefined = opt.getClass().getMethod("isDefined");
+        if ((boolean) isDefined.invoke(opt)) {
+            return opt.getClass().getMethod("get").invoke(opt);
+        }
+        Object defaultOpt = sparkSessionClass.getMethod("getDefaultSession").invoke(null);
+        if ((boolean) isDefined.invoke(defaultOpt)) {
+            return defaultOpt.getClass().getMethod("get").invoke(defaultOpt);
+        }
+        return null;
     }
 
     // 1. BeforeAll: ensure MutatorSparkExtension is active on JVM SparkSession
@@ -130,6 +147,7 @@ public class SparkMutatorExtension implements
 
         boolean isBaseline = (MutantRegistry.getInstance().getActiveMutantOrNull() == null);
         getStore(context).put("baselineMode", isBaseline);
+        getStore(context).put(KEY_BASELINE_START, System.currentTimeMillis());
     }
 
     // 2. BeforeEach: if driving mutation run, set active mutant
@@ -253,11 +271,20 @@ public class SparkMutatorExtension implements
         Boolean baselineMode = getStore(context).get("baselineMode", Boolean.class);
         Boolean baselineFailed = getStore(context).get("baselineFailed", Boolean.class);
 
-        if (Boolean.TRUE.equals(baselineMode) && !Boolean.TRUE.equals(baselineFailed)) {
-            runInProcessMutations(context);
+        try {
+            if (Boolean.TRUE.equals(baselineMode) && !Boolean.TRUE.equals(baselineFailed)) {
+                Long baselineStart = getStore(context).get(KEY_BASELINE_START, Long.class);
+                long baselineElapsed = baselineStart != null
+                        ? System.currentTimeMillis() - baselineStart
+                        : 0L;
+                runInProcessMutations(context, baselineElapsed);
+            }
+        } finally {
+            // WP-25: the report must survive a watchdog abandon (partial
+            // results with a TIMED_OUT tail beat no artifact), so finalize
+            // runs even when the loop threw.
+            ReportSink.finalizeAndWriteReports();
         }
-
-        ReportSink.finalizeAndWriteReports();
 
         // WP-24 governance gate: real-failure ERRORED is zero-tolerance (a
         // dead session or shim violation means the harness/engine is broken);
@@ -354,7 +381,7 @@ public class SparkMutatorExtension implements
         }
     }
 
-    private void runInProcessMutations(ExtensionContext context) throws IOException {
+    private void runInProcessMutations(ExtensionContext context, long baselineElapsedMillis) throws IOException {
         JsonNode catalogNode = readCatalogArrayOrNull();
         if (catalogNode == null) {
             return;
@@ -362,8 +389,23 @@ public class SparkMutatorExtension implements
 
         Class<?> testClass = context.getRequiredTestClass();
 
+        // Per-mutant deadline, mirroring the Mojo's semantics
+        // (MutationLoopCoordinator): ceil(baseline elapsed × multiplier).
+        double multiplier = doubleProperty(PROP_TIMEOUT_MULTIPLIER, 2.0);
+        long deadlineMillis = baselineElapsedMillis > 0
+                ? (long) Math.ceil(baselineElapsedMillis * multiplier)
+                : 1000L;
+        // WP-25: mark the report's config echo as deadline-enforcing before
+        // the loop runs (ReportWriter resolves the property at finalize time).
+        System.setProperty(PROP_TIMEOUT_ENFORCED, "true");
+
         for (JsonNode mutantEntry : catalogNode) {
-            runSingleMutant(testClass, mutantEntry);
+            if (!runSingleMutant(testClass, mutantEntry, deadlineMillis)) {
+                throw new IllegalStateException(
+                        "WP-25 watchdog abandoned the mutation loop: a mutant's re-run thread "
+                                + "ignored cancel + interrupt for " + (2 * watchdogGraceMillis)
+                                + "ms; partial report flushed with a TIMED_OUT tail.");
+            }
         }
     }
 
@@ -376,14 +418,34 @@ public class SparkMutatorExtension implements
         return catalogNode;
     }
 
-    private void runSingleMutant(Class<?> testClass, JsonNode mutantEntry) {
+    /**
+     * Runs one mutant's re-run under the WP-25 per-mutant deadline.
+     *
+     * <p>The re-run executes on a fresh daemon worker thread while this (the
+     * loop) thread waits with a deadline — the two-channel split: the waiter
+     * is never the blocked thread, so the control channel stays live while
+     * the execution channel is wedged inside a hung Spark job.
+     *
+     * @return false when the watchdog abandoned the loop (worker unkillable);
+     *         true otherwise (outcome recorded, loop may continue).
+     */
+    private boolean runSingleMutant(Class<?> testClass, JsonNode mutantEntry, long deadlineMillis) {
         String mutantId = mutantEntry.get("mutantId").asText();
         Set<String> mappedTestNames = parseMappedTestNames(mutantEntry);
 
         long start = System.currentTimeMillis();
-        boolean killed = false;
-        String failureDetail = null;
-        boolean errored = false;
+        boolean timedOut = false;
+        boolean abandoned = false;
+        Throwable root = null;
+
+        FutureTask<Throwable> reRun = new FutureTask<>(() -> {
+            try {
+                executeTestsForMutant(testClass, mappedTestNames);
+                return null;
+            } catch (Throwable t) {
+                return unwrap(t);
+            }
+        });
 
         try {
             // Honesty-guard baseline: forget the previous mutant's applied
@@ -392,30 +454,122 @@ public class SparkMutatorExtension implements
             MutantRegistry.getInstance().setActiveMutant(mutantId);
             cleanCatalystCache();
 
-            executeTestsForMutant(testClass, mappedTestNames);
-        } catch (Throwable t) {
-            Throwable root = unwrap(t);
-            if (root instanceof AssertionError) {
-                killed = true;
-                failureDetail = root.getMessage() != null ? root.getMessage() : root.toString();
-            } else {
-                errored = true;
-                failureDetail = "Unhandled exception: " + root.toString();
-            }
-        } finally {
+            Thread worker = new Thread(reRun, "spark-mutator-mutant-" + mutantId);
+            worker.setDaemon(true); // a wedged worker must never block JVM exit
+            worker.start();
             try {
-                if (mutantId.equals(MutantRegistry.getInstance().getActiveMutantOrNull())) {
-                    MutantRegistry.getInstance().clearActiveMutant(mutantId);
-                } else if (MutantRegistry.getInstance().getActiveMutantOrNull() != null) {
-                    MutantRegistry.getInstance().reset();
+                root = reRun.get(deadlineMillis, TimeUnit.MILLISECONDS);
+            } catch (TimeoutException e) {
+                timedOut = true;
+                if (!escalateToCompletion(worker)) {
+                    // In-process analog of the PySpark stage-3 breaker: the
+                    // worker ignored both cancellation channels. Record the
+                    // deadline hit, abandon the loop, and let afterAll's
+                    // finally flush the partial report. The wedged daemon is
+                    // left to die with the JVM (WP-19: this path must never
+                    // terminate the user's JVM, so no thread kill / exit).
+                    abandoned = true;
+                    recordOutcomeQuietly(mutantId, "TIMED_OUT",
+                            System.currentTimeMillis() - start,
+                            "timed out (> " + deadlineMillis + "ms); re-run thread unkillable "
+                                    + "after cancel + interrupt, abandoning loop");
+                    return false;
                 }
-            } finally {
-                cleanCatalystCache();
+            } catch (ExecutionException e) {
+                root = unwrap(e.getCause() == null ? e : e.getCause());
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                root = e;
+            }
+        } catch (Throwable t) {
+            root = unwrap(t);
+        } finally {
+            if (!abandoned) {
+                try {
+                    if (mutantId.equals(MutantRegistry.getInstance().getActiveMutantOrNull())) {
+                        MutantRegistry.getInstance().clearActiveMutant(mutantId);
+                    } else if (MutantRegistry.getInstance().getActiveMutantOrNull() != null) {
+                        MutantRegistry.getInstance().reset();
+                    }
+                } finally {
+                    cleanCatalystCache();
+                }
             }
         }
 
         long elapsed = System.currentTimeMillis() - start;
+        if (timedOut) {
+            // Deadline precedence mirrors the fork path's classify() order: a
+            // mutant that hung may have applied the mutation without
+            // finishing, so the deadline hit outranks whatever the
+            // interrupted re-run threw.
+            recordOutcomeQuietly(mutantId, "TIMED_OUT", elapsed,
+                    "timed out (> " + deadlineMillis + "ms)");
+            return true;
+        }
+
+        boolean killed = false;
+        String failureDetail = null;
+        boolean errored = false;
+        if (root instanceof AssertionError) {
+            killed = true;
+            failureDetail = root.getMessage() != null ? root.getMessage() : root.toString();
+        } else if (root != null) {
+            errored = true;
+            failureDetail = "Unhandled exception: " + root.toString();
+        }
         recordMutantOutcome(mutantId, killed, errored, failureDetail, elapsed);
+        return true;
+    }
+
+    /**
+     * Escalation ladder (docs/ARCHITECTURE.md §6.2, ported in-process):
+     * channel 1 cancels the session's running Spark jobs from THIS thread;
+     * channel 2 interrupts the worker. The fork path's third channel —
+     * killing the process — is unavailable here (the loop runs in the user's
+     * test JVM).
+     *
+     * @return true if the worker terminated, false if it survived both
+     *         channels (the in-process analog of stage-3
+     *         DriverUnresponsiveError).
+     */
+    private static boolean escalateToCompletion(Thread worker) {
+        cancelAllJobsQuietly();
+        joinQuietly(worker, watchdogGraceMillis);
+        if (!worker.isAlive()) {
+            return true;
+        }
+        worker.interrupt();
+        joinQuietly(worker, watchdogGraceMillis);
+        return !worker.isAlive();
+    }
+
+    private static void joinQuietly(Thread worker, long millis) {
+        try {
+            worker.join(millis);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    /**
+     * Control channel: cancels all jobs on the active/default session's
+     * SparkContext. The user's test code sets no job group, so the targeted
+     * {@code cancelJobGroup} of the fork/PySpark paths degrades to
+     * {@code cancelAllJobs} here.
+     */
+    private static void cancelAllJobsQuietly() {
+        try {
+            Object spark = activeOrDefaultSessionOrNull();
+            if (spark == null) {
+                return;
+            }
+            Object sc = Class.forName("org.apache.spark.sql.SparkSession")
+                    .getMethod("sparkContext").invoke(spark);
+            sc.getClass().getMethod("cancelAllJobs").invoke(sc);
+        } catch (Throwable ignored) {
+            // No session/context to cancel; the interrupt channel still runs.
+        }
     }
 
     private Set<String> parseMappedTestNames(JsonNode mutantEntry) {
