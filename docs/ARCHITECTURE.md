@@ -77,7 +77,7 @@ flowchart TD
 top-level types only (§5.1). `interceptor-spark-*` → concrete Catalyst
 internals for exactly one binary combination (the 3.5 pair share
 `interceptor-spark-3.5-shared`; only `supportedVersion` differs per binary).
-`maven-plugin`, `mutator-junit5`, and `pytest-spark-mutator` → `mutator-core`
+`maven-plugin`, `mutator-junit5`, and `pytest-spark-mutation-testing` → `mutator-core`
 (+ the dispatcher via the runtime), never a concrete shim directly. The
 `interceptor-bundle-*` leaf modules exist to break a reactor cycle
 (`interceptor-runtime` test-depends on a shim; a shim cannot therefore depend
@@ -155,7 +155,7 @@ socket duplicates a channel Py4J already provides. The design therefore
 routes **all** control-plane calls through the existing Py4J `GatewayServer`
 that PySpark already owns (`spark._sc._gateway`), calling directly into
 `mutator-core` classes that are already on the driver classpath because
-`pytest-spark-mutator` mounted the interceptor JAR into `spark.jars` at
+`pytest-spark-mutation-testing` mounted the interceptor JAR into `spark.jars` at
 session creation.
 
 ### 2.2 Two-Channel Model (mandatory)
