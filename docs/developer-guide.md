@@ -101,31 +101,77 @@ T ≈ T_baseline
 ```
 
 - `M` = catalogued mutants, `S_fork` = JVM + SparkSession startup per fork
-  (measure once on your box; 30–60 s is typical for `local[1]`).
+  (box-dependent — measure it, don't guess; see the log line below).
 - Per-mutant deadline = `ceil(T_baseline × timeoutMultiplier)`; a `TIMED_OUT`
   mutant costs the *full* deadline, a `SURVIVED` one costs its mapped tests'
-  runtime, a `KILLED` one usually dies fast (fail-fast).
+  runtime, a `KILLED` one usually dies fast (fail-fast) — but the fixed
+  `S_fork` is paid either way.
 
-**Worked example.** Suite baseline 4 min, 40 mutants, multiplier 2.0
-(deadline 8 min), fork startup 45 s, mix 60% killed / 30% survived / 10%
-timed-out:
+The loop logs one line per mutant so a pilot run measures all three terms
+directly (`forkStartupMs` = fork wall − surefire suite time ≈ JVM spawn +
+booter; the SparkSession startup paid in `@BeforeAll` rides inside the suite
+side of that subtraction):
 
 ```
-T_baseline                    4 min
-fork startup   40 × 45s      ≈ 30 min
-killed   24 × ~1 min          ≈ 18 min
-survived 12 × ~2.5 min        ≈ 30 min
-timed out  4 × 8 min          ≈ 32 min
-                              ─────────
-realistic                     ≈ 1 h 50 min
-hard upper bound (every mutant hits its deadline): 4 + 40×8 ≈ 5.4 h
+baseline forkStartupMs=712 execMs=10819
+mutant 004b557d8a972fbb verdict=KILLED forkStartupMs=783 execMs=11824 deadlineMs=21638
 ```
+
+**Measured reference point** (`examples/spark-java-pipeline`, Spark 3.5.3
+`local[1]`, JDK 17, 3 test classes, `M` = 138, 2026-09-20):
+
+```
+T_baseline                                  10.8 s
+S_fork        138 × ~5.4 s (0.4 JVM + ~5 session) ≈ 12.4 min
+test exec     138 × ~0.4 s                  ≈ 0.9 min
+                                            ─────────
+measured mutant wall                        ≈ 13.7 min  (+ 10.8 s baseline)
+```
+
+The measured fact that reshapes the planning: per-mutant cost is ~*uniform*
+(mean 5.9 s; KILLED 5.8 s ≈ SURVIVED 6.1 s ≈ NOT_APPLIED 5.8 s) because ~93%
+of it is fixed fork overhead — JVM spawn + booter (0.4 s) plus the fresh
+SparkSession (~5 s) — not test execution (~0.4 s). Fail-fast barely helps: a
+killed fork still pays the full session startup. Wall-clock is therefore
+≈ `M × 5.9 s`, linear in the catalog with a steep fixed slope; a 1000-mutant
+catalog budgets ~98 min serial on this machine class.
+
+**Sharding (opt-in).** When the serial wall hurts, split the catalog across N
+CI jobs — each runs the same goal with `-Dspark.mutator.shards=N
+-Dspark.mutator.shard=i` and executes only its index slice (`i % N == shard`;
+discovery/baseline is never sharded):
+
+```
+T_sharded ≈ T_baseline + ceil(M / N) × 5.9 s      (N parallel CI jobs)
+```
+
+Resource note: each concurrent fork is a full Spark driver JVM — budget
+~2 GB heap per worker on a shared runner, and keep sessions' `local[k]` ×
+workers ≤ cores. Measured `N` = 2 on the example: 69 + 69 mutants, per-mutantId
+verdicts identical to the `N` = 1 run (re-verified after the per-shard surefire
+isolation landed: sequential shard vs `N` = 1, 0 diffs).
+
+**One command instead of N + 1.** `-Dspark.mutator.workers=N` runs the whole
+sharded run in-process: baseline once, N child Maven processes (loop-only,
+parent's deadline), in-process merge, gates post-join. Same resource note
+applies — each worker is a full Spark driver fork (~2 GB heap + ~0.5 GB child
+Maven JVM). Measured on the example: per-mutantId verdicts identical to the
+serial run (0 diffs), so `workers` is gate-safe. The one requirement it puts
+on **your test fixtures**: never write to fixed shared paths (e.g.
+`target/my-fixture`) — concurrent forks collide on Hadoop's `_temporary`
+staging and a `FileNotFound` ERROR kills the fork, producing a false KILLED
+for whatever mutant was active. Use a per-fork scratch directory
+(`Files.createTempDirectory`) for any parquet/file fixture, exactly like the
+example's suites do. Quick iteration and CI gates are both fine on `workers`;
+CI sharding (sequential jobs) remains the alternative when you want one
+report per machine with no shared-filesystem assumptions.
 
 Planning rules of thumb:
 
 1. **Pilot first.** Run the loop once on a small module or with
-   `-Dspark.mutator.excludedMutators=WINDOW,OTHER` to measure `S_fork` and the
-   kill/survive mix before budgeting a full run.
+   `-Dspark.mutator.excludedMutators=WINDOW,OTHER` and read the per-mutant
+   timing lines: they give `S_fork`, the verdict mix, and the deadline
+   directly — no stopwatch needed.
 2. **The in-process path has no fork startup** (`mvn test` reuses the
    session) — for local iteration on large catalogs it is the fast loop; the
    fork loop is the CI-grade one. Per-mutant deadlines are enforced here too
@@ -134,8 +180,11 @@ Planning rules of thumb:
 3. **Shrink the catalog, not the deadline.** `excludedMutators` removes whole
    families; lowering `timeoutMultiplier` below 2.0 risks flaky `TIMED_OUT`
    verdicts on legitimately slow mutants.
-4. Parallel fork execution is the designed answer to large catalogs —
-   planned as WP-28 (sequential today).
+4. **Scale out with CI sharding** (`spark.mutator.shards`, §3.2) — measured
+   verdict-identical at `N` = 2. An in-JVM parallel fork pool was evaluated
+   and rejected for now: per-mutant cost is fixed-overhead-dominated, so a
+   local pool's realistic ceiling on a 2 GB/worker budget is ~2× on this
+   machine class, not worth the concurrent-`executeMojo` risk.
 
 ### 1.4 Flaky baselines
 
@@ -234,6 +283,8 @@ fork on this channel.
 | `spark.mutator.outputDirectory` | file path | Report/output directory (same key as the user-facing config — one key, both surfaces) |
 | `spark.mutator.targetModules` | comma-separated module-path prefixes | Discovery registers a candidate only when the current file-path hint starts with one of the prefixes. Blank/unset ⇒ no filtering. With the property set while the hint is still the default `unknown` (no harness fed one), NOTHING is registered and a single warning is emitted — fail-safe, because silent full-catalog behavior would be the "every mutant survived" failure mode in disguise |
 | `spark.mutator.excludedMutators` | comma-separated OperatorType names (`JOIN`, `FILTER`, `AGGREGATE`, `WINDOW`, `PROJECT`, `OTHER`; case-insensitive) | Discovery skips excluded operators; the match/rewrite path refuses them even if a stale catalog entry exists (observable skip, never an error). Unrecognized tokens are ignored with a one-time warning. The Python path additionally accepts legacy mutator display names, enforced in the pytest plugin |
+| `spark.mutator.skipBaseline` | `true` \| `false` | **Internal — set only by the single-command orchestrator's children.** Skips the baseline fork (the parent already ran discovery); requires `spark.mutator.deadlineMillis` |
+| `spark.mutator.deadlineMillis` | positive integer | **Internal — set only by the single-command orchestrator's children.** The parent's computed per-mutant deadline, passed down so children never recompute it under contention (determinism) |
 
 The bridge reads these once at JVM startup and drives `MutantRegistry`, so the
 activation logic is **framework-agnostic** (JUnit 5, ScalaTest, … all just call
@@ -261,6 +312,10 @@ table below) applies. The same values can be supplied per-invocation instead:
 | `excludedMutators` | `spark.mutator.excludedMutators` | *(empty)* | comma-separated OperatorType names excluded from mutation; echoed into the report's `config.excludedMutators` block |
 | `exitProcessOnGateFailure` | `spark.mutator.exitProcessOnGateFailure` | `true` | `false` ⇒ a gate violation throws `MojoFailureException` (Maven exit code 1, reactor honors `--fail-at-end`/`--fail-never`) instead of terminating the JVM with the dedicated exit code 2 — the multi-module escape hatch |
 | `injectAddOpens` | `spark.mutator.injectAddOpens` | `true` | inject Spark's mandatory modular-runtime JVM args (the `--add-opens` set) into Surefire's `argLine`; no-op on Java 8 |
+| `shards` | `spark.mutator.shards` | `1` | CI sharding: total shard count N. Each CI job runs the same goal with `-Dspark.mutator.shards=N -Dspark.mutator.shard=i`; the catalog is filtered by index (`i % N == shard`), slices are deterministic and disjoint, and the N jobs run in parallel. `< 1` fails the build; `> 8` warns (each shard is a full Spark driver fork — see §1.3's resource note). Discovery is never sharded; every shard runs the full baseline. WP-24 gates evaluate on each shard's slice — the mutation score is per-slice until a merge-across-shards step exists |
+| `shard` | `spark.mutator.shard` | `0` | this worker's shard index, in `[0, shards)`; out-of-range fails the build. When sharding is active the report's `config` block echoes `shards`/`shard` (default reports stay byte-identical) |
+| `mergeOnly` | `spark.mutator.mergeOnly` | `false` | post-join merge for CI sharding: skips baseline + loop, reads the full catalog + every shard's `outcomes/<id>.json`, writes the combined reports, then evaluates the gates once on the merged counts. Fails loudly if any catalogued mutant lacks an outcome (a shard died — rerun it, then merge) |
+| `workers` | `spark.mutator.workers` | `1` | single-command orchestration: the parent runs the baseline once, spawns N child Maven processes (one shard each, parent's deadline), waits, merges in-process, gates post-join. Default 1 = serial path, byte-identical. Each worker ≈ 2 GB Spark fork + ~0.5 GB child Maven JVM; `< 1` fails, `> 8` warns. Mutually exclusive with explicit `shards`/`shard` and with `mergeOnly`. Measured verdict-identical to the serial run; your test fixtures must use per-fork scratch paths, not fixed `target/` paths (see §1.3) |
 
 
 All parameters in a single `<configuration>` block:

@@ -7,6 +7,7 @@ It is the runnable proof of the Java integration story:
 |---|---|---|
 | `OrdersPipelineWeakTest` | count-only checks | mutants **SURVIVE** |
 | `OrdersPipelineHardenedTest` | exact-row checks | mutants **KILLED** |
+| `ComplexPipelineHardenedTest` | exact totals + weak twin branch | filter/window mutants **KILLED**, twins SURVIVE (complex-plan smoke; 8 designed NOT_APPLIED) |
 
 Same pipeline, same mutants — the only variable is assertion strength. That
 difference is the mutation score.
@@ -92,6 +93,16 @@ mvn test                        # plain functional run (no mutation loop — the
 
 mvn test-compile spark-mutation-testing:mutate -Pweak      # mutants SURVIVE
 mvn test-compile spark-mutation-testing:mutate -Phardened  # mutants KILLED
+
+# one-command parallel run: baseline + 2 shard workers + merge + gates
+mvn test-compile spark-mutation-testing:mutate -Phardened -Dspark.mutator.workers=2
+
+# CI matrix: N shard jobs, then one merge job
+mvn test-compile spark-mutation-testing:mutate -Phardened \
+    -Dspark.mutator.shards=2 -Dspark.mutator.shard=0   # job 0 of 2
+mvn test-compile spark-mutation-testing:mutate -Phardened \
+    -Dspark.mutator.shards=2 -Dspark.mutator.shard=1   # job 1 of 2
+mvn spark-mutation-testing:mutate -Dspark.mutator.mergeOnly=true   # merge job
 ```
 
 Reports land in `target/spark-mutator-reports/`:

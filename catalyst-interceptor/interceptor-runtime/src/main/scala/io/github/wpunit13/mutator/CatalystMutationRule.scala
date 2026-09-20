@@ -319,31 +319,43 @@ class CatalystMutationRule(shim: PlanMutatorShim, phase: CatalystMutationRule.Ph
       //     this index for the candidate's shape).
       // Empty-schema stubs (e.g. the Project(Nil) ColumnPruning inserts under
       // count(1)-style aggregates) are never matched: a rewrite against them
-      // would be a no-op masquerading as an applied mutation. Same "first node
-      // wins" ambiguity policy as the exact key; a miss here still leaves the
-      // honesty guard's not-applied classification intact.
-      def walkFallback(node: LogicalPlan): Unit = {
-        if (matched.isEmpty) {
-          val candidateFieldNames = node.schema.map(_.name).toSet
-          if (!node.getTagValue(AlreadyMutatedTag).contains(true) &&
-              node.schema.nonEmpty &&
-              node.getClass.getSimpleName == pending.nodeClass &&
-              (pending.referencedColumns.isEmpty ||
-                pending.referencedColumns.exists(candidateFieldNames.contains)) &&
-              !isInsertedNullGuard(node, pending.exprClasses) &&
-              offersMutationIndex(node, meta.getMutationIndex)) {
-            matched = Some(node)
-          }
-          if (matched.isEmpty) {
-            node.children.foreach(walkFallback)
-          }
+      // would be a no-op masquerading as an applied mutation. When MORE THAN
+      // ONE node satisfies the identity criteria, the match is ambiguous —
+      // first-match-wins would make the verdict depend on plan order, which
+      // shifts with AQE replan timing under CPU contention (measured: the same
+      // mutant flips SURVIVED/KILLED between sequential and concurrent runs).
+      // Refusing an ambiguous fallback keeps verdicts load-independent: the
+      // honesty guard classifies the run as not-applied, which the mutation
+      // score excludes. A miss here still leaves that classification intact.
+      var fallbackCandidates: List[LogicalPlan] = Nil
+      def collectFallbackCandidates(node: LogicalPlan): Unit = {
+        val candidateFieldNames = node.schema.map(_.name).toSet
+        if (!node.getTagValue(AlreadyMutatedTag).contains(true) &&
+            node.schema.nonEmpty &&
+            node.getClass.getSimpleName == pending.nodeClass &&
+            (pending.referencedColumns.isEmpty ||
+              pending.referencedColumns.exists(candidateFieldNames.contains)) &&
+            !isInsertedNullGuard(node, pending.exprClasses) &&
+            offersMutationIndex(node, meta.getMutationIndex)) {
+          fallbackCandidates = fallbackCandidates :+ node
         }
+        node.children.foreach(collectFallbackCandidates)
       }
-      walkFallback(plan)
-      matched.foreach { _ =>
-        CatalystMutationRule.log(
-          s"mutant $activeMutantId matched via identity fallback: the optimizer rewrote the " +
-            "analyzed node's expressions or pruned its output, so its shape-free key drifted")
+      collectFallbackCandidates(plan)
+      fallbackCandidates match {
+        case single :: Nil =>
+          matched = Some(single)
+          CatalystMutationRule.log(
+            s"mutant $activeMutantId matched via identity fallback: the optimizer rewrote the " +
+              "analyzed node's expressions or pruned its output, so its shape-free key drifted")
+        case ambiguous =>
+          CatalystMutationRule.log(
+            s"mutant $activeMutantId NOT applied: identity fallback is ambiguous — " +
+              s"${ambiguous.size} same-shape ${pending.nodeClass} candidates; refusing to guess " +
+                "so the verdict stays load-independent (honesty guard: not-applied)")
+          // Pending stays: a later batch may still match unambiguously; if
+          // none ever does, the honesty guard's not-applied classification
+          // stands.
       }
     }
 

@@ -1,5 +1,6 @@
 package io.github.wpunit13.mutator.maven;
 
+import org.apache.maven.execution.MavenExecutionRequest;
 import org.apache.maven.execution.MavenSession;
 import io.github.wpunit13.mutator.report.ReportWriter;
 import org.apache.maven.plugin.AbstractMojo;
@@ -21,8 +22,13 @@ import org.eclipse.aether.resolution.ArtifactResolutionException;
 import org.eclipse.aether.resolution.ArtifactResult;
 
 import java.io.File;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Entry point for mutation testing of Java and Scala Spark pipelines:
@@ -111,6 +117,39 @@ public class MutateMojo extends AbstractMojo {
     private boolean perTestAttribution = false;
 
     /**
+     * Post-join merge for CI sharding: skips the baseline and the mutation
+     * loop, reads the full catalog + every shard's {@code outcomes/<id>.json}
+     * from {@code outputDirectory}, and writes the combined reports. Gates
+     * (WP-24 + {@code minMutationScore}) then evaluate once on the merged
+     * counts. Fails loudly if any catalogued mutant lacks an outcome file (a
+     * shard died or was truncated — rerun it, then merge).
+     */
+    @Parameter(property = "spark.mutator.mergeOnly", defaultValue = "false")
+    private boolean mergeOnly = false;
+
+    /**
+     * Single-command orchestration: the parent runs the baseline once, spawns
+     * {@code workers} child Maven processes (each running one shard of the
+     * catalog with the parent's deadline), waits for all, then merges in-process
+     * and evaluates the gates on the merged counts. Default 1 = today's serial
+     * path, byte-identical. Each worker is a full Spark driver fork (~2 GB heap)
+     * plus a child Maven JVM. Mutually exclusive with explicit
+     * {@code shards}/{@code shard} and with {@code mergeOnly}.
+     */
+    @Parameter(property = "spark.mutator.workers", defaultValue = "1")
+    private int workers = 1;
+
+    /** Internal (orchestrator → child): skip the baseline fork; the parent
+      * already ran it. Never set by hand — see §3.1. */
+    @Parameter(property = "spark.mutator.skipBaseline", defaultValue = "false")
+    private boolean skipBaseline = false;
+
+    /** Internal (orchestrator → child): the parent's computed per-mutant
+      * deadline. Never set by hand — see §3.1. */
+    @Parameter(property = "spark.mutator.deadlineMillis", defaultValue = "0")
+    private long deadlineMillis = 0;
+
+    /**
      * Module-path prefixes limiting which candidates Discovery registers (WP-19).
      * Settable via {@code -Dspark.mutator.targetModules=a,b} or {@code <configuration>}
      * (comma-separated on the command line; one element per {@code <targetModules>}).
@@ -155,6 +194,21 @@ public class MutateMojo extends AbstractMojo {
     @Parameter(property = "spark.mutator.injectAddOpens", defaultValue = "true")
     private boolean injectAddOpens = true;
 
+    /**
+     * Mechanism-(c) CI sharding: total shard count N. Each CI job runs the same
+     * goal with {@code -Dspark.mutator.shards=N -Dspark.mutator.shard=i}; the
+     * catalog is filtered by index ({@code i % N == i_shard}), so slices are
+     * deterministic and disjoint and the N jobs can run in parallel. Default 1
+     * = whole catalog, byte-identical to the unsharded loop. Discovery (the
+     * baseline fork) is never sharded.
+     */
+    @Parameter(property = "spark.mutator.shards", defaultValue = "1")
+    private int shards = 1;
+
+    /** This worker's shard index, in {@code [0, shards)}. */
+    @Parameter(property = "spark.mutator.shard", defaultValue = "0")
+    private int shard = 0;
+
     private MutationLoopCoordinator coordinator;
     private SurefireExecutor surefireExecutor;
 
@@ -162,6 +216,40 @@ public class MutateMojo extends AbstractMojo {
     public void execute() throws MojoExecutionException, MojoFailureException {
         if (project == null) {
             throw new MojoExecutionException("MavenProject cannot be null");
+        }
+
+        // Sharding validation: hard below the floor (a misconfigured shard must
+        // not silently run everything or nothing), soft above the cap.
+        if (shards < 1) {
+            throw new MojoExecutionException("spark.mutator.shards must be >= 1 (got " + shards + ")");
+        }
+        if (shard < 0 || shard >= shards) {
+            throw new MojoExecutionException(
+                    "spark.mutator.shard must be in [0," + shards + ") (got " + shard + ")");
+        }
+        if (shards > 8) {
+            getLog().warn("spark.mutator.shards=" + shards
+                    + " exceeds the soft cap of 8. Each shard runs a full Spark driver fork:"
+                    + " budget ~2 GB heap per concurrent worker on a shared runner, and keep"
+                    + " sessions' local[k] x workers <= cores.");
+        }
+        if (mergeOnly && workers > 1) {
+            throw new MojoExecutionException(
+                    "spark.mutator.workers has no effect with mergeOnly=true (the merge runs no forks)");
+        }
+        if (workers > 1 && (shards != 1 || shard != 0)) {
+            throw new MojoExecutionException(
+                    "Use either spark.mutator.workers (single-command orchestration) or"
+                            + " spark.mutator.shards/shard (CI matrix), not both.");
+        }
+        if (workers < 1) {
+            throw new MojoExecutionException("spark.mutator.workers must be >= 1 (got " + workers + ")");
+        }
+        if (workers > 8) {
+            getLog().warn("spark.mutator.workers=" + workers
+                    + " exceeds the soft cap of 8. Each worker runs a full Spark driver fork"
+                    + " (~2 GB heap) plus a child Maven JVM (~0.5 GB); budget RAM accordingly"
+                    + " and keep sessions' local[k] x workers <= cores.");
         }
 
         // 1. Detect Spark version from test classpath and map to interceptor coordinate
@@ -192,7 +280,11 @@ public class MutateMojo extends AbstractMojo {
             return;
         }
 
-        MutationLoopCoordinator.MutationLoopResult loopResult = runMutationLoop(resolveReportsDirectory());
+        MutationLoopCoordinator.MutationLoopResult loopResult = mergeOnly
+                ? runMerge(resolveReportsDirectory())
+                : workers > 1
+                        ? runOrchestrated(resolveReportsDirectory())
+                        : runMutationLoop(resolveReportsDirectory());
 
         getLog().info("Mutation testing finished: "
                 + loopResult.getKilled() + " killed, "
@@ -261,6 +353,133 @@ public class MutateMojo extends AbstractMojo {
 
     private MutationLoopCoordinator.MutationLoopResult runMutationLoop(File reportsDir)
             throws MojoExecutionException, MojoFailureException {
+        try {
+            return effectiveCoordinator(reportsDir).execute();
+        } catch (MojoFailureException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new MojoExecutionException("Mutation testing execution failed: " + e.getMessage(), e);
+        }
+    }
+
+    private MutationLoopCoordinator.MutationLoopResult runMerge(File reportsDir)
+            throws MojoExecutionException {
+        try {
+            return effectiveCoordinator(reportsDir).mergeFromDisk();
+        } catch (MojoExecutionException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new MojoExecutionException("Merge failed: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Single-command orchestration: baseline once in-process, then N child
+     * Maven processes (one per shard, loop-only, parent's deadline), then the
+     * in-process merge + post-join gates. A failed child fails the parent
+     * after all workers finish — no merge over a partial outcome set.
+     */
+    private MutationLoopCoordinator.MutationLoopResult runOrchestrated(File reportsDir)
+            throws MojoExecutionException, MojoFailureException {
+        MutationLoopCoordinator coord = effectiveCoordinator(reportsDir);
+        long deadline;
+        try {
+            deadline = coord.runBaseline();
+        } catch (MojoFailureException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new MojoExecutionException("Orchestrated baseline failed: " + e.getMessage(), e);
+        }
+
+        MavenExecutionRequest request = mavenSession.getRequest();
+        Map<String, String> userProps = new HashMap<>();
+        request.getUserProperties().forEach((k, v) -> userProps.put(String.valueOf(k), String.valueOf(v)));
+        List<Process> children = new ArrayList<>();
+        try {
+            for (int i = 0; i < workers; i++) {
+                List<String> cmd = childCommand(
+                        mavenBinary(),
+                        request.getGoals(),
+                        request.getActiveProfiles(),
+                        userProps,
+                        workers, i, deadline);
+                ProcessBuilder pb = new ProcessBuilder(cmd);
+                pb.directory(new File(mavenSession.getExecutionRootDirectory()));
+                pb.inheritIO();
+                children.add(pb.start());
+            }
+        } catch (IOException e) {
+            throw new MojoExecutionException("Failed to launch shard workers: " + e.getMessage(), e);
+        }
+
+        List<Integer> failed = new ArrayList<>();
+        try {
+            for (int i = 0; i < children.size(); i++) {
+                if (children.get(i).waitFor() != 0) {
+                    failed.add(i);
+                }
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new MojoExecutionException("Interrupted while waiting for shard workers", e);
+        }
+        if (!failed.isEmpty()) {
+            throw new MojoExecutionException("Shard worker(s) failed: " + failed
+                    + ". Rerun the failed shard(s) with -Dspark.mutator.shards=" + workers
+                    + " -Dspark.mutator.shard=<i>, then merge with -Dspark.mutator.mergeOnly=true.");
+        }
+
+        try {
+            return coord.mergeFromDisk();
+        } catch (Exception e) {
+            throw new MojoExecutionException("Orchestrated merge failed: " + e.getMessage(), e);
+        }
+    }
+
+    /** Reconstructs the child Maven invocation: same goals, -P profiles and
+      * CLI -D properties as the parent, then the shard directives (last, so
+      * they win). workers is pinned to 1 in children — a child must never
+      * re-fan-out. */
+    static List<String> childCommand(
+            String mavenBinary,
+            List<String> goals,
+            List<String> profileIds,
+            Map<String, String> userProperties,
+            int workers,
+            int shardIndex,
+            long deadlineMillis) {
+        List<String> cmd = new ArrayList<>();
+        cmd.add(mavenBinary);
+        cmd.addAll(goals == null || goals.isEmpty() ? List.of("spark-mutation-testing:mutate") : goals);
+        if (profileIds != null && !profileIds.isEmpty()) {
+            cmd.add("-P" + String.join(",", profileIds));
+        }
+        if (userProperties != null) {
+            userProperties.forEach((k, v) -> cmd.add("-D" + k + "=" + v));
+        }
+        // Overrides last: later -D wins on the CLI.
+        cmd.add("-Dspark.mutator.workers=1");
+        cmd.add("-Dspark.mutator.shards=" + workers);
+        cmd.add("-Dspark.mutator.shard=" + shardIndex);
+        cmd.add("-Dspark.mutator.skipBaseline=true");
+        cmd.add("-Dspark.mutator.deadlineMillis=" + deadlineMillis);
+        return cmd;
+    }
+
+    /** The exact Maven binary that launched this JVM (maven.home), falling
+      * back to PATH — keeps wrapper-pinned versions consistent for children. */
+    private static String mavenBinary() {
+        String mavenHome = System.getProperty("maven.home");
+        if (mavenHome != null && !mavenHome.isBlank()) {
+            Path candidate = Path.of(mavenHome, "bin", "mvn");
+            if (Files.exists(candidate)) {
+                return candidate.toString();
+            }
+        }
+        return "mvn";
+    }
+
+    private MutationLoopCoordinator effectiveCoordinator(File reportsDir) {
         MutationLoopCoordinator effectiveCoordinator = coordinator;
         if (effectiveCoordinator == null) {
             SurefireExecutor executor = surefireExecutor != null
@@ -273,17 +492,15 @@ public class MutateMojo extends AbstractMojo {
                     minMutationScore,
                     targetModules,
                     excludedMutators,
-                    perTestAttribution
+                    perTestAttribution,
+                    getLog()::info,
+                    shards,
+                    shard,
+                    skipBaseline,
+                    deadlineMillis
             );
         }
-
-        try {
-            return effectiveCoordinator.execute();
-        } catch (MojoFailureException e) {
-            throw e;
-        } catch (Exception e) {
-            throw new MojoExecutionException("Mutation testing execution failed: " + e.getMessage(), e);
-        }
+        return effectiveCoordinator;
     }
 
     /**

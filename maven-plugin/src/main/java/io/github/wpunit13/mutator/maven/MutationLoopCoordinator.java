@@ -22,6 +22,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.function.Consumer;
 
 /**
  * Coordinates the full mutation testing lifecycle across the Maven fork boundary:
@@ -29,8 +30,10 @@ import java.util.Objects;
  *   <li>Runs an unmutated baseline; the baseline fork discovers candidates and
  *       writes {@code catalog.json} into the shared output directory.</li>
  *   <li>Reads {@code catalog.json} back into orchestrator memory.</li>
- *   <li>Forks Surefire once per mutant (sequential today, parallelizable later),
- *       classifies each terminal outcome, and writes {@code outcomes/<id>.json}.</li>
+ *   <li>Forks Surefire once per mutant (sequential within a shard; CI
+ *       sharding via {@code spark.mutator.shards} splits the catalog across
+ *       jobs), classifies each terminal outcome, and writes
+ *       {@code outcomes/<id>.json}.</li>
  *   <li>Merges all outcome files and emits JSON/SARIF/HTML via the file-based
  *       {@link ReportWriter} (never the in-memory {@code ReportSink}, which is a
  *       per-JVM singleton that cannot see the fork's work).</li>
@@ -62,6 +65,17 @@ public class MutationLoopCoordinator {
       * report); when false (default), the fork aborts after the first
       * failure and only the first killer is attributed. */
     private final boolean perTestAttribution;
+    /** Per-mutant timing sink (Milestone-0 instrumentation); no-op by default. */
+    private final Consumer<String> timingLog;
+    /** Mechanism-(c) CI sharding: this worker runs catalog indices i where
+      * i % shards == shard. Default 1/0 = whole catalog, byte-identical loop. */
+    private final int shards;
+    private final int shard;
+    /** Single-command orchestrator: children skip the baseline (the parent
+      * already ran it) and use the parent's deadline — recomputing it under
+      * contention could flip borderline TIMED_OUT verdicts vs N=1. */
+    private final boolean skipBaseline;
+    private final long deadlineOverrideMillis;
 
     public MutationLoopCoordinator(
             SurefireExecutor surefireExecutor,
@@ -91,6 +105,40 @@ public class MutationLoopCoordinator {
             List<String> targetModules,
             List<String> excludedMutators,
             boolean perTestAttribution) {
+        this(surefireExecutor, timeoutMultiplier, outputDirectory, minMutationScore,
+                targetModules, excludedMutators, perTestAttribution, l -> {}, 1, 0,
+                false, 0L);
+    }
+
+    public MutationLoopCoordinator(
+            SurefireExecutor surefireExecutor,
+            double timeoutMultiplier,
+            File outputDirectory,
+            double minMutationScore,
+            List<String> targetModules,
+            List<String> excludedMutators,
+            boolean perTestAttribution,
+            Consumer<String> timingLog,
+            int shards,
+            int shard) {
+        this(surefireExecutor, timeoutMultiplier, outputDirectory, minMutationScore,
+                targetModules, excludedMutators, perTestAttribution, timingLog, shards, shard,
+                false, 0L);
+    }
+
+    public MutationLoopCoordinator(
+            SurefireExecutor surefireExecutor,
+            double timeoutMultiplier,
+            File outputDirectory,
+            double minMutationScore,
+            List<String> targetModules,
+            List<String> excludedMutators,
+            boolean perTestAttribution,
+            Consumer<String> timingLog,
+            int shards,
+            int shard,
+            boolean skipBaseline,
+            long deadlineOverrideMillis) {
         this.surefireExecutor = Objects.requireNonNull(surefireExecutor, "surefireExecutor must not be null");
         this.timeoutMultiplier = timeoutMultiplier > 0.0 ? timeoutMultiplier : 2.0;
         this.outputDirectory = outputDirectory != null
@@ -100,6 +148,21 @@ public class MutationLoopCoordinator {
         this.targetModules = targetModules == null ? List.of() : List.copyOf(targetModules);
         this.excludedMutators = excludedMutators == null ? List.of() : List.copyOf(excludedMutators);
         this.perTestAttribution = perTestAttribution;
+        this.timingLog = timingLog == null ? l -> {} : timingLog;
+        if (shards < 1) {
+            throw new IllegalArgumentException("shards must be >= 1 (got " + shards + ")");
+        }
+        if (shard < 0 || shard >= shards) {
+            throw new IllegalArgumentException("shard must be in [0," + shards + ") (got " + shard + ")");
+        }
+        this.shards = shards;
+        this.shard = shard;
+        if (skipBaseline && deadlineOverrideMillis <= 0) {
+            throw new IllegalArgumentException(
+                    "skipBaseline requires deadlineOverrideMillis > 0 (got " + deadlineOverrideMillis + ")");
+        }
+        this.skipBaseline = skipBaseline;
+        this.deadlineOverrideMillis = deadlineOverrideMillis;
     }
 
     public MutationLoopCoordinator(SurefireExecutor surefireExecutor) {
@@ -107,6 +170,18 @@ public class MutationLoopCoordinator {
     }
 
     public MutationLoopResult execute() throws MojoFailureException, MojoExecutionException {
+        long timeoutMillis = skipBaseline ? deadlineOverrideMillis : runBaseline();
+        return runLoop(timeoutMillis);
+    }
+
+    /**
+     * Runs the unmutated baseline fork (discovery &rarr; {@code catalog.json})
+     * and returns the per-mutant deadline. Public so the single-command
+     * orchestrator can run the baseline once and pass the deadline to its
+     * shard children (determinism: children must not recompute it under
+     * contention).
+     */
+    public long runBaseline() throws MojoFailureException, MojoExecutionException {
         ensureOutputDirectory();
 
         // 1. Baseline: run unmutated. The baseline fork performs discovery and
@@ -124,13 +199,90 @@ public class MutationLoopCoordinator {
             throw new MojoFailureException(
                     "Baseline test suite failed. Mutation testing aborted." + detail);
         }
+        timingLog.accept("baseline forkStartupMs=" + forkStartupMillis(baselineResult)
+                + " execMs=" + baselineResult.getElapsedMillis());
 
-        long timeoutMillis = baselineResult.getElapsedMillis() > 0
+        return baselineResult.getElapsedMillis() > 0
                 ? (long) Math.ceil(baselineResult.getElapsedMillis() * timeoutMultiplier)
                 : 1000L;
+    }
 
+    /**
+     * Post-join merge for CI sharding: reads the full catalog + every shard's
+     * outcome files, re-attaches diff snippets, and writes the combined
+     * reports. No baseline, no forks. Gates run afterwards in the Mojo on the
+     * merged counts (evaluated once, post-join).
+     */
+    public MutationLoopResult mergeFromDisk() throws MojoExecutionException {
+        ensureOutputDirectory();
+
+        List<MutantMetadata> catalog;
+        try {
+            catalog = new ArrayList<>(readCatalog());
+        } catch (MojoExecutionException e) {
+            throw new MojoExecutionException(
+                    "Nothing to merge: no catalog in " + outputDirectory
+                            + " (run the mutation goal first). " + e.getMessage(), e);
+        }
+        Map<String, MutantResult> merged = readOutcomes();
+
+        // Fail-loudly: a shard that died or was truncated leaves catalogued
+        // mutants without outcomes — never merge into a silent partial report.
+        List<String> missing = catalog.stream()
+                .map(MutantMetadata::getMutantId)
+                .filter(id -> !merged.containsKey(id))
+                .toList();
+        if (!missing.isEmpty()) {
+            throw new MojoExecutionException(
+                    missing.size() + " of " + catalog.size()
+                            + " catalogued mutants have no outcome file — a shard run failed"
+                            + " or was truncated. Rerun the failed shard(s), then merge."
+                            + " First missing: " + missing.get(0));
+        }
+
+        for (String mutantId : catalog.stream().map(MutantMetadata::getMutantId).toList()) {
+            mergeDiffSnippet(catalog, mutantId);
+        }
+
+        int killed = 0;
+        int survived = 0;
+        int timedOut = 0;
+        int errored = 0;
+        int notApplied = 0;
+        for (MutantMetadata meta : catalog) {
+            switch (merged.get(meta.getMutantId()).getStatus()) {
+                case KILLED -> killed++;
+                case SURVIVED -> survived++;
+                case TIMED_OUT -> timedOut++;
+                case ERRORED -> errored++;
+                case NOT_APPLIED -> notApplied++;
+                case SKIPPED -> { /* not produced by the fork path */ }
+            }
+        }
+
+        double score = mutationScore(killed, timedOut, survived);
+        String reportPath = ReportWriter.writeReports(
+                outputDirectory, catalog, merged, reportConfig());
+        return new MutationLoopResult(
+                catalog.size(), killed, survived, timedOut, errored, notApplied, score, reportPath);
+    }
+
+    private MutationLoopResult runLoop(long timeoutMillis) throws MojoFailureException, MojoExecutionException {
         // 2. Read the catalog back across the process boundary.
         List<MutantMetadata> catalog = new ArrayList<>(readCatalog());
+
+        // Mechanism-(c) CI sharding: keep this worker's disjoint index slice.
+        // Discovery (the baseline fork) is never sharded — every shard runs the
+        // full baseline and filters the catalog by index afterwards.
+        if (shards > 1) {
+            List<MutantMetadata> slice = new ArrayList<>();
+            for (int i = 0; i < catalog.size(); i++) {
+                if (i % shards == shard) {
+                    slice.add(catalog.get(i));
+                }
+            }
+            catalog = slice;
+        }
 
         if (catalog.isEmpty()) {
             String reportPath = ReportWriter.writeReports(
@@ -158,7 +310,10 @@ public class MutationLoopCoordinator {
                             // runs the whole suite so the surefire XML records
                             // every failing test (sole-killer attribution).
                             !perTestAttribution,
-                            timeoutMillis));
+                            timeoutMillis,
+                            // Concurrent workers isolate surefire's booter-jar
+                            // temp dir, XML report dir, and Spark/Derby state.
+                            shards > 1 ? "-shard-" + shard : null));
 
             MutantResult outcome = withFailingTests(
                     classify(mutantId, mutantResult, timeoutMillis),
@@ -166,6 +321,11 @@ public class MutationLoopCoordinator {
             writeOutcome(outcome);
             mergeDiffSnippet(catalog, mutantId);
             attributeExecutedTests(catalog, mutantId, mutantResult.getExecutedTestIds());
+            timingLog.accept("mutant " + mutantId
+                    + " verdict=" + outcome.getStatus()
+                    + " forkStartupMs=" + forkStartupMillis(mutantResult)
+                    + " execMs=" + mutantResult.getElapsedMillis()
+                    + " deadlineMs=" + timeoutMillis);
 
             switch (outcome.getStatus()) {
                 case KILLED -> killed++;
@@ -262,7 +422,8 @@ public class MutationLoopCoordinator {
         // The fork path always enforces the per-mutant deadline (fork kill on
         // expiry), so its config echo records timeoutEnforced = true.
         return new ReportWriter.Config(
-                targetModules, excludedMutators, timeoutMultiplier, minMutationScore, true);
+                targetModules, excludedMutators, timeoutMultiplier, minMutationScore, true,
+                shards, shard);
     }
 
     /**
@@ -395,6 +556,14 @@ public class MutationLoopCoordinator {
         return new MutantResult(mutantId, MutantStatus.SURVIVED, elapsed, null, now);
     }
 
+    /** Fixed per-fork overhead (§1.3 S_fork): the plugin path has no
+      * launch/wait seam — executeMojo spans JVM spawn through teardown — so
+      * fork startup is derived as fork wall time minus the surefire suite
+      * time (0 when the XML is unparseable, e.g. a timed-out fork). */
+    private static long forkStartupMillis(SurefireExecutor.SurefireResult r) {
+        return Math.max(0L, r.getElapsedMillis() - r.getTestTimeMillis());
+    }
+
     private static double mutationScore(int killed, int timedOut, int survived) {
         int denominator = killed + timedOut + survived;
         if (denominator == 0) {
@@ -426,6 +595,14 @@ public class MutationLoopCoordinator {
 
     public List<String> getExcludedMutators() {
         return excludedMutators;
+    }
+
+    public int getShards() {
+        return shards;
+    }
+
+    public int getShard() {
+        return shard;
     }
 
     /**

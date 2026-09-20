@@ -94,7 +94,7 @@ public class SurefireExecutor {
             mavenSession.setCurrentProject(project);
         }
 
-        Path reportsDir = surefireReportsDirectory();
+        Path reportsDir = surefireReportsDirectory(request);
         cleanSurefireXmlReports(reportsDir);
 
         SurefireResult result;
@@ -115,12 +115,14 @@ public class SurefireExecutor {
 
     /** The fork's XML report directory: surefire's default
      * ${project.build.directory}/surefire-reports (mirrors the descriptor
-     * default this class injects in buildConfiguration). */
-    private Path surefireReportsDirectory() {
+     * default this class injects in buildConfiguration), suffixed per worker
+     * when the request carries an isolation suffix. */
+    private Path surefireReportsDirectory(SurefireRequest request) {
         String buildDir = project.getBuild() != null && project.getBuild().getDirectory() != null
                 ? project.getBuild().getDirectory()
                 : "target";
-        return Path.of(buildDir, "surefire-reports");
+        String suffix = request.getWorkerSuffix() == null ? "" : request.getWorkerSuffix();
+        return Path.of(buildDir, "surefire-reports" + suffix);
     }
 
     /** Deletes stale TEST-*.xml from a previous fork so the post-run parse
@@ -155,14 +157,17 @@ public class SurefireExecutor {
         }
         try {
             SurefireTestResults parsed = parseSurefireReports(reportsDir);
-            return result.withTestResults(parsed.executedTestIds(), parsed.failedTestIds());
+            return result.withTestResults(parsed.executedTestIds(), parsed.failedTestIds(), parsed.testTimeMillis());
         } catch (Exception e) {
             return result;
         }
     }
 
-    /** Parsed view of one fork's surefire XML reports. */
-    record SurefireTestResults(List<String> executedTestIds, List<String> failedTestIds) {
+    /** Parsed view of one fork's surefire XML reports. testTimeMillis sums
+      * the testsuite {@code time} attributes (suite wall time incl. setup),
+      * the fork's non-orchestration time — its complement against the fork's
+      * wall clock is the fixed per-fork overhead (JVM spawn + booter + teardown). */
+    record SurefireTestResults(List<String> executedTestIds, List<String> failedTestIds, long testTimeMillis) {
     }
 
     /** Parses every TEST-*.xml in {@code reportsDir}. Executed = every
@@ -171,8 +176,9 @@ public class SurefireExecutor {
     static SurefireTestResults parseSurefireReports(Path reportsDir) throws IOException {
         List<String> executed = new ArrayList<>();
         List<String> failed = new ArrayList<>();
+        double suiteTimeSeconds = 0.0;
         if (reportsDir == null || !Files.isDirectory(reportsDir)) {
-            return new SurefireTestResults(List.of(), List.of());
+            return new SurefireTestResults(List.of(), List.of(), 0L);
         }
         DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
         try {
@@ -190,6 +196,10 @@ public class SurefireExecutor {
             for (Path xml : xmls) {
                 try {
                     Element suite = factory.newDocumentBuilder().parse(xml.toFile()).getDocumentElement();
+                    String timeAttr = suite.getAttribute("time");
+                    if (!timeAttr.isBlank()) {
+                        suiteTimeSeconds += Double.parseDouble(timeAttr);
+                    }
                     NodeList testcases = suite.getElementsByTagName("testcase");
                     for (int i = 0; i < testcases.getLength(); i++) {
                         Element tc = (Element) testcases.item(i);
@@ -213,7 +223,8 @@ public class SurefireExecutor {
         }
         executed.sort(String::compareTo);
         failed.sort(String::compareTo);
-        return new SurefireTestResults(List.copyOf(executed), List.copyOf(failed));
+        return new SurefireTestResults(List.copyOf(executed), List.copyOf(failed),
+                Math.round(suiteTimeSeconds * 1000.0));
     }
 
     private Plugin resolveSurefirePlugin() {
@@ -267,8 +278,46 @@ public class SurefireExecutor {
 
         applyDescriptorDefaults(config, mojoDescriptor);
         applyRequestOptions(config, request);
+        applyWorkerIsolation(config, request);
 
         return config;
+    }
+
+    /** Concurrent-worker isolation (packet fix list): workers in one module
+      * must not share surefire's booter-jar temp dir or the XML report dir —
+      * a concurrent cleanup deletes the other fork's booter jar mid-launch
+      * (fork dies, "Unable to access jarfile", 0 tests, NOT_APPLIED). Spark
+      * and Derby state are split per worker via the argLine channel. */
+    private void applyWorkerIsolation(Xpp3Dom config, SurefireRequest request) {
+        String suffix = request.getWorkerSuffix();
+        if (suffix == null) {
+            return;
+        }
+        setOrAdd(config, "tempDir", "surefire" + suffix);
+        setOrAdd(config, "reportsDirectory", "${project.build.directory}/surefire-reports" + suffix);
+
+        String buildDir = project.getBuild() != null && project.getBuild().getDirectory() != null
+                ? project.getBuild().getDirectory()
+                : "target";
+        String extras = " -Dspark.sql.warehouse.dir=" + buildDir + "/spark-warehouse" + suffix
+                + " -Dderby.system.home=" + buildDir + "/derby" + suffix;
+        Xpp3Dom argLine = config.getChild("argLine");
+        if (argLine == null) {
+            argLine = new Xpp3Dom("argLine");
+            config.addChild(argLine);
+            argLine.setValue(extras.trim());
+        } else {
+            argLine.setValue(argLine.getValue() + extras);
+        }
+    }
+
+    private static void setOrAdd(Xpp3Dom config, String name, String value) {
+        Xpp3Dom node = config.getChild(name);
+        if (node == null) {
+            node = new Xpp3Dom(name);
+            config.addChild(node);
+        }
+        node.setValue(value);
     }
 
     /**
@@ -457,14 +506,23 @@ public class SurefireExecutor {
         private final String testFilter;
         private final boolean failFast;
         private final long timeoutMillis;
+        /** Per-worker isolation suffix (concurrent shard workers in one module);
+          * null = default shared surefire dirs. */
+        private final String workerSuffix;
 
         public SurefireRequest(Map<String, String> systemProperties, String testFilter, boolean failFast, long timeoutMillis) {
+            this(systemProperties, testFilter, failFast, timeoutMillis, null);
+        }
+
+        public SurefireRequest(Map<String, String> systemProperties, String testFilter, boolean failFast,
+                               long timeoutMillis, String workerSuffix) {
             this.systemProperties = systemProperties != null
                     ? Collections.unmodifiableMap(new HashMap<>(systemProperties))
                     : Collections.emptyMap();
             this.testFilter = testFilter;
             this.failFast = failFast;
             this.timeoutMillis = timeoutMillis;
+            this.workerSuffix = workerSuffix;
         }
 
         public Map<String, String> getSystemProperties() {
@@ -482,6 +540,10 @@ public class SurefireExecutor {
         public long getTimeoutMillis() {
             return timeoutMillis;
         }
+
+        public String getWorkerSuffix() {
+            return workerSuffix;
+        }
     }
 
     /**
@@ -494,19 +556,21 @@ public class SurefireExecutor {
         private final String failureDetail;
         private final List<String> executedTestIds;
         private final List<String> failedTestIds;
+        private final long testTimeMillis;
 
         public SurefireResult(int exitCode, long elapsedMillis, boolean timedOut, String failureDetail) {
-            this(exitCode, elapsedMillis, timedOut, failureDetail, List.of(), List.of());
+            this(exitCode, elapsedMillis, timedOut, failureDetail, List.of(), List.of(), 0L);
         }
 
         private SurefireResult(int exitCode, long elapsedMillis, boolean timedOut, String failureDetail,
-                               List<String> executedTestIds, List<String> failedTestIds) {
+                               List<String> executedTestIds, List<String> failedTestIds, long testTimeMillis) {
             this.exitCode = exitCode;
             this.elapsedMillis = elapsedMillis;
             this.timedOut = timedOut;
             this.failureDetail = failureDetail;
             this.executedTestIds = executedTestIds == null ? List.of() : List.copyOf(executedTestIds);
             this.failedTestIds = failedTestIds == null ? List.of() : List.copyOf(failedTestIds);
+            this.testTimeMillis = testTimeMillis;
         }
 
         public static SurefireResult success(long elapsedMillis) {
@@ -523,8 +587,14 @@ public class SurefireExecutor {
 
         /** Copy with the fork's parsed test attribution. */
         public SurefireResult withTestResults(List<String> executedTestIds, List<String> failedTestIds) {
+            return withTestResults(executedTestIds, failedTestIds, 0L);
+        }
+
+        /** Copy with the fork's parsed test attribution and suite test time. */
+        public SurefireResult withTestResults(List<String> executedTestIds, List<String> failedTestIds,
+                                              long testTimeMillis) {
             return new SurefireResult(exitCode, elapsedMillis, timedOut, failureDetail,
-                    executedTestIds, failedTestIds);
+                    executedTestIds, failedTestIds, testTimeMillis);
         }
 
         public boolean isSuccess() {
@@ -559,6 +629,11 @@ public class SurefireExecutor {
         /** The tests whose failure killed the mutant. */
         public List<String> getFailedTestIds() {
             return failedTestIds;
+        }
+
+        /** Sum of the fork's surefire suite times (0 when unparseable). */
+        public long getTestTimeMillis() {
+            return testTimeMillis;
         }
     }
 

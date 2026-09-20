@@ -101,6 +101,12 @@ public final class JsonReportWriter {
         // WP-25: additive marker (schema §5.3) distinguishing enforced-deadline
         // reports from the pre-WP-25 echo-only era.
         config.put("timeoutEnforced", runConfig.isTimeoutEnforced());
+        // Sharding echo: emitted only when sharding is active so the default
+        // (unsharded) report stays byte-identical.
+        if (runConfig.getShards() > 1) {
+            config.put("shards", runConfig.getShards());
+            config.put("shard", runConfig.getShard());
+        }
 
         ObjectNode summary = root.putObject("summary");
         summary.put("totalMutants", catalog.size());

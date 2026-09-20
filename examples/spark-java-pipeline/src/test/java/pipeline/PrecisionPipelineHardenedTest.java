@@ -10,6 +10,9 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -29,12 +32,14 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  */
 class PrecisionPipelineHardenedTest {
 
-    private static final String OUT = "target/precision-report-hardened";
-
     private static SparkSession spark;
+    // Per-fork scratch dir: fixed target/ paths collide when two mutation
+    // workers run the suite concurrently (Hadoop _temporary staging races →
+    // FileNotFound → a false KILLED for whatever mutant was active).
+    private static Path runDir;
 
     @BeforeAll
-    static void setUp() {
+    static void setUp() throws IOException {
         spark = SparkSession.builder()
                 .master("local[1]")
                 .appName("PrecisionPipelineHardenedTest")
@@ -42,6 +47,7 @@ class PrecisionPipelineHardenedTest {
                 .config("spark.sql.shuffle.partitions", "1")
                 .config("spark.ui.enabled", "false")
                 .getOrCreate();
+        runDir = Files.createTempDirectory("precision-hardened");
     }
 
     @AfterAll
@@ -59,7 +65,7 @@ class PrecisionPipelineHardenedTest {
                 .add("entry_id", DataTypes.IntegerType)
                 .add("balance", DataTypes.createDecimalType(38, 10));
         // Parquet-backed fixture: see PrecisionPipelineWeakTest.ledger().
-        String path = "target/precision-ledger-hardened";
+        String path = runDir.resolve("ledger").toString();
         spark.createDataFrame(rows, schema).repartition(1).write().mode("overwrite").parquet(path);
         return spark.read().parquet(path);
     }
@@ -67,8 +73,9 @@ class PrecisionPipelineHardenedTest {
     @Test
     void hardenedAssertsExactDecimalValue() {
         Dataset<Row> report = PrecisionPipeline.buildReport(ledger());
-        report.write().mode("overwrite").parquet(OUT);
-        List<Row> rows = spark.read().parquet(OUT).collectAsList();
+        String out = runDir.resolve("report").toString();
+        report.write().mode("overwrite").parquet(out);
+        List<Row> rows = spark.read().parquet(out).collectAsList();
         assertEquals(1, rows.size());
 
         // Exact-value assertion: BigDecimal.toString() on the baseline is the

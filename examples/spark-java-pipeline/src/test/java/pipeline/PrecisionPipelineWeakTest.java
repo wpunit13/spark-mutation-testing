@@ -10,7 +10,10 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.io.IOException;
 import java.math.BigDecimal;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -32,12 +35,14 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  */
 class PrecisionPipelineWeakTest {
 
-    private static final String OUT = "target/precision-report-weak";
-
     private static SparkSession spark;
+    // Per-fork scratch dir: fixed target/ paths collide when two mutation
+    // workers run the suite concurrently (Hadoop _temporary staging races →
+    // FileNotFound → a false KILLED for whatever mutant was active).
+    private static Path runDir;
 
     @BeforeAll
-    static void setUp() {
+    static void setUp() throws IOException {
         spark = SparkSession.builder()
                 .master("local[1]")
                 .appName("PrecisionPipelineWeakTest")
@@ -45,6 +50,7 @@ class PrecisionPipelineWeakTest {
                 .config("spark.sql.shuffle.partitions", "1")
                 .config("spark.ui.enabled", "false")
                 .getOrCreate();
+        runDir = Files.createTempDirectory("precision-weak");
     }
 
     @AfterAll
@@ -65,7 +71,7 @@ class PrecisionPipelineWeakTest {
         // folded away by ConvertToLocalRelation before the mutation rule's
         // optimizer-phase walk sees it, which would leave DECIMAL_TO_DOUBLE
         // nothing to mutate (NOT_APPLIED). A file scan keeps the projection.
-        String path = "target/precision-ledger-weak";
+        String path = runDir.resolve("ledger").toString();
         spark.createDataFrame(rows, schema).repartition(1).write().mode("overwrite").parquet(path);
         return spark.read().parquet(path);
     }
@@ -73,8 +79,9 @@ class PrecisionPipelineWeakTest {
     @Test
     void weakAssertsOnlyToTheCent() {
         Dataset<Row> report = PrecisionPipeline.buildReport(ledger());
-        report.write().mode("overwrite").parquet(OUT);
-        List<Row> rows = spark.read().parquet(OUT).collectAsList();
+        String out = runDir.resolve("report").toString();
+        report.write().mode("overwrite").parquet(out);
+        List<Row> rows = spark.read().parquet(out).collectAsList();
         assertEquals(1, rows.size());
 
         // Number-typed read: BigDecimal on the baseline, Double under the
