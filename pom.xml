@@ -16,6 +16,31 @@
     child modules should declare NO versions of their own.
   </description>
 
+  <url>https://github.com/wpunit13/spark-mutation-testing</url>
+
+  <licenses>
+    <license>
+      <name>Apache License, Version 2.0</name>
+      <url>https://www.apache.org/licenses/LICENSE-2.0.txt</url>
+      <distribution>repo</distribution>
+    </license>
+  </licenses>
+
+  <scm>
+    <url>https://github.com/wpunit13/spark-mutation-testing</url>
+    <connection>scm:git:https://github.com/wpunit13/spark-mutation-testing.git</connection>
+    <developerConnection>scm:git:git@github.com:wpunit13/spark-mutation-testing.git</developerConnection>
+    <tag>HEAD</tag>
+  </scm>
+
+  <developers>
+    <developer>
+      <id>wpunit13</id>
+      <name>Punit Walawalkar</name>
+      <url>https://github.com/wpunit13</url>
+    </developer>
+  </developers>
+
   <modules>
     <module>mutator-core</module>
     <module>catalyst-interceptor</module>
@@ -59,6 +84,10 @@
     <plugin.surefire.version>3.2.5</plugin.surefire.version>
     <plugin.shade.version>3.5.3</plugin.shade.version>
     <plugin.scala.version>4.9.2</plugin.scala.version>
+    <plugin.source.version>3.3.1</plugin.source.version>
+    <plugin.javadoc.version>3.11.2</plugin.javadoc.version>
+    <plugin.gpg.version>3.2.7</plugin.gpg.version>
+    <plugin.central.version>0.11.0</plugin.central.version>
     <plugin.scalatest.version>2.2.0</plugin.scalatest.version>
     <plugin.jar.version>3.4.1</plugin.jar.version>
 
@@ -262,4 +291,143 @@
       </plugins>
     </pluginManagement>
   </build>
+
+  <profiles>
+      <!--
+        Release profile (docs/RELEASING.md): sources + javadoc/scaladoc jars,
+        GPG signing, and Central Portal publishing. Publishes exactly the
+        public artifact surface; everything consumed only via shading stays
+        internal (excludeArtifacts below).
+      -->
+      <profile>
+        <id>release</id>
+        <build>
+          <pluginManagement>
+            <plugins>
+              <!--
+                Scala modules: scaladoc jar under the `javadoc` classifier,
+                satisfying Central's javadoc requirement for Scala artifacts.
+                Bound via pluginManagement so ONLY modules that declare the
+                scala plugin (the Scala modules) inherit it — doc-jar fails on
+                Java-only modules, so a profile-level <plugins> binding is
+                wrong. Java modules get their javadoc jar from maven-javadoc-plugin.
+              -->
+              <plugin>
+                <groupId>net.alchim31.maven</groupId>
+                <artifactId>scala-maven-plugin</artifactId>
+                <executions>
+                  <execution>
+                    <id>attach-scaladoc</id>
+                    <phase>package</phase>
+                    <goals>
+                      <goal>doc-jar</goal>
+                    </goals>
+                  </execution>
+                </executions>
+              </plugin>
+            </plugins>
+          </pluginManagement>
+          <plugins>
+            <plugin>
+              <groupId>org.apache.maven.plugins</groupId>
+              <artifactId>maven-source-plugin</artifactId>
+              <version>${plugin.source.version}</version>
+              <executions>
+                <execution>
+                  <id>attach-sources</id>
+                  <phase>package</phase>
+                  <goals>
+                    <goal>jar-no-fork</goal>
+                  </goals>
+                </execution>
+              </executions>
+            </plugin>
+
+            <!--
+              doclint=none keeps legacy javadoc from failing the build.
+              failOnError=false lets the Scala-only modules (no .java sources)
+              pass through without a javadoc jar — their scaladoc jar is
+              attached by the scala-maven-plugin doc-jar execution below.
+            -->
+            <plugin>
+              <groupId>org.apache.maven.plugins</groupId>
+              <artifactId>maven-javadoc-plugin</artifactId>
+              <version>${plugin.javadoc.version}</version>
+              <configuration>
+                <doclint>none</doclint>
+                <failOnError>false</failOnError>
+                <failOnWarnings>false</failOnWarnings>
+              </configuration>
+              <executions>
+                <execution>
+                  <id>attach-javadocs</id>
+                  <phase>package</phase>
+                  <goals>
+                    <goal>jar</goal>
+                  </goals>
+                </execution>
+              </executions>
+            </plugin>
+
+            <!--
+              CI has no tty: loopback pinentry reads GPG_PASSPHRASE from the
+              -Dgpg.passphrase the workflow supplies.
+            -->
+            <plugin>
+              <groupId>org.apache.maven.plugins</groupId>
+              <artifactId>maven-gpg-plugin</artifactId>
+              <version>${plugin.gpg.version}</version>
+              <executions>
+                <execution>
+                  <id>sign-artifacts</id>
+                  <phase>verify</phase>
+                  <goals>
+                    <goal>sign</goal>
+                  </goals>
+                </execution>
+              </executions>
+              <configuration>
+                <gpgArguments>
+                  <arg>--pinentry-mode</arg>
+                  <arg>loopback</arg>
+                </gpgArguments>
+              </configuration>
+            </plugin>
+
+            <!--
+              Publishes to the Central Portal (server id `central`).
+              extensions=true binds the publish goal into the deploy phase.
+              autoPublish=false: the FIRST release lands in the Portal for
+              manual review; flip to true in a LATER packet (never the one
+              that first publishes — RELEASING.md guard rail).
+            -->
+            <plugin>
+              <groupId>org.sonatype.central</groupId>
+              <artifactId>central-publishing-maven-plugin</artifactId>
+              <version>${plugin.central.version}</version>
+              <extensions>true</extensions>
+              <configuration>
+                <publishingServerId>central</publishingServerId>
+                <autoPublish>false</autoPublish>
+                <!--
+                  Public surface (WP-22 DESIGN §2): parent POM + core + junit5
+                  + maven-plugin + one bundle per supported combo. The thin
+                  shims, the shared layer, and the api/dispatch/runtime layers
+                  are consumed exclusively via shading — never published.
+                -->
+                <excludeArtifacts>
+                  <artifact>interceptor-api</artifact>
+                  <artifact>interceptor-dispatch</artifact>
+                  <artifact>interceptor-runtime</artifact>
+                  <artifact>interceptor-spark-3.5-shared</artifact>
+                  <artifact>interceptor-spark-3.5_2.12</artifact>
+                  <artifact>interceptor-spark-3.5_2.13</artifact>
+                  <artifact>interceptor-spark-4.2_2.13</artifact>
+                </excludeArtifacts>
+              </configuration>
+            </plugin>
+          </plugins>
+        </build>
+      </profile>
+    </profiles>
 </project>
