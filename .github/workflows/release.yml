@@ -1,0 +1,197 @@
+name: Release
+
+# WP-22: tag-triggered publish to Maven Central + PyPI (docs/RELEASING.md).
+#
+# The trigger glob `v*.*.*` alone is NOT numeric — `v1.0.0-rc1` matches it,
+# and Central is immutable. Publication is therefore enforced twice: the
+# loose glob here for readability, and a strict regex guard below for
+# correctness. Non-matching tags exit 0 (skip, not fail).
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    outputs:
+      ok: ${{ steps.check.outputs.ok }}
+    steps:
+      - id: check
+        run: |
+          if echo "$GITHUB_REF_NAME" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Tag $GITHUB_REF_NAME is not a numeric release tag (vX.Y.Z) — skipping."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  publish-maven:
+    needs: guard
+    if: needs.guard.outputs.ok == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: 'maven'
+
+      - name: Derive version from tag
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      # Tag and published version are two views of one decision: the tagged
+      # commit's POM must already carry this exact version (prepare_release.sh
+      # wrote it). A mismatch fails the build instead of publishing wrong
+      # coordinates to an immutable repository.
+      - name: Guard — POM version must equal the tag
+        run: |
+          POM_VERSION="$(mvn -B -q help:evaluate -Dexpression=project.version -DforceStdout)"
+          echo "tag=$VERSION pom=$POM_VERSION"
+          [ "$POM_VERSION" = "$VERSION" ] || {
+            echo "ERROR: POM version ($POM_VERSION) != tag version ($VERSION) — refusing to publish" >&2
+            exit 1
+          }
+
+      - name: Import GPG signing key
+        run: |
+          echo "$GPG_PRIVATE_KEY" > "$RUNNER_TEMP/signing-key.asc"
+          gpg --batch --import "$RUNNER_TEMP/signing-key.asc"
+          rm -f "$RUNNER_TEMP/signing-key.asc"
+
+      - name: Configure Maven credentials (server id `central`)
+        run: |
+          mkdir -p ~/.m2
+          cat > ~/.m2/settings.xml <<'XML'
+          <settings xmlns="http://maven.apache.org/SETTINGS/1.0.0">
+            <servers>
+              <server>
+                <id>central</id>
+                <username>${env.CENTRAL_USERNAME}</username>
+                <password>${env.CENTRAL_PASSWORD}</password>
+              </server>
+            </servers>
+          </settings>
+          XML
+
+      # Tests are NOT re-run here: releases cut only from green main (CI
+      # already ran the full matrix on this commit).
+      - name: Build and deploy to Maven Central
+        run: >
+          mvn -B -Prelease clean deploy
+          -DskipTests
+          -Dgpg.passphrase="$GPG_PASSPHRASE"
+        env:
+          CENTRAL_USERNAME: ${{ secrets.CENTRAL_USERNAME }}
+          CENTRAL_PASSWORD: ${{ secrets.CENTRAL_PASSWORD }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+
+      # The wheel must embed the SAME jars this run published to Central.
+      - name: Upload bundle jars for the PyPI job
+        uses: actions/upload-artifact@v4
+        with:
+          name: interceptor-bundles
+          path: |
+            catalyst-interceptor/interceptor-bundle/target/interceptor-spark-3.5_2.13.jar
+            catalyst-interceptor/interceptor-bundle-2.12/target/interceptor-spark-3.5_2.12.jar
+            catalyst-interceptor/interceptor-bundle-4.2/target/interceptor-spark-4.2_2.13.jar
+          if-no-files-found: error
+
+  publish-pypi:
+    needs: publish-maven
+    # Must match the PyPI trusted-publisher registration exactly
+    # (repo + workflow file + environment) — a mismatch is a 403.
+    environment: release
+    permissions:
+      id-token: write
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Download bundle jars from the Maven job
+        uses: actions/download-artifact@v4
+        with:
+          name: interceptor-bundles
+          path: .
+
+      - name: Bundle jars into the wheel
+        run: python python/build_hooks/bundle_jars.py
+
+      # Wheel-only: no sdist — building from source needs Maven-built jars.
+      - name: Build wheel
+        run: |
+          pip install build twine
+          python -m build --wheel python/
+          twine check --strict python/dist/*
+
+      - name: Publish to PyPI (OIDC trusted publishing — no API token)
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: python/dist/
+
+  smoke-test:
+    needs: [publish-maven, publish-pypi]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Derive version from tag
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      # First release only: the Maven deployment sits in the Central Portal
+      # for manual review (autoPublish=false) and Central's CDN sync lags a
+      # few minutes even after approval — poll instead of failing fast.
+      - name: Install wheel from PyPI and assert bundled jars
+        run: |
+          python -m venv "$RUNNER_TEMP/venv"
+          . "$RUNNER_TEMP/venv/bin/activate"
+          pip install "pytest-spark-mutation-testing==$VERSION"
+          python - <<'PY'
+          import glob, pytest_spark_mutator
+          jars = glob.glob(
+              "jars/interceptor-spark-*.jar",
+              root_dir=pytest_spark_mutator.__path__[0],
+          )
+          assert len(jars) >= 2, f"expected bundled jars, found {jars}"
+          print("bundled jars:", jars)
+          PY
+
+      - name: Resolve plugin + bundle from Maven Central
+        run: |
+          for _ in $(seq 1 30); do
+            if mvn -B -q dependency:get \
+                 -Dartifact="io.github.wpunit13:spark-mutation-testing-maven-plugin:$VERSION" \
+              && mvn -B -q dependency:get \
+                 -Dartifact="io.github.wpunit13:interceptor-bundle-spark-3.5_2.13:$VERSION"; then
+              echo "Central resolution OK"
+              exit 0
+            fi
+            echo "Not on Central yet (attempt $_/30) — waiting 60s..."
+            sleep 60
+          done
+          echo "ERROR: artifacts not resolvable from Central after 30 minutes" >&2
+          exit 1
