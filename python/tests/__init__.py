@@ -1,1 +1,1 @@
-"""Test package for pytest-spark-mutator."""
+"""Test package for pytest-spark-mutation-testing."""
