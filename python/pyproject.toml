@@ -5,7 +5,24 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "pytest-spark-mutation-testing"
 version = "0.1.0"
+description = "Semantic mutation testing for PySpark pipelines - a pytest plugin that mutates Catalyst plans and scores your suite"
+readme = "README.md"
+license = { text = "Apache-2.0" }
 requires-python = ">=3.9"
+authors = [{ name = "Punit Walawalkar" }]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Framework :: Pytest",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Testing",
+]
 dependencies = [
     # Supported shim matrix: Spark 3.5.x (latest LTS) and 4.2.x (current GA
     # minor, Scala 2.13-only). See pytest_spark_mutator/version_detect.py.
@@ -13,6 +30,11 @@ dependencies = [
     "py4j>=0.10.9",
     "tomli; python_version < '3.11'",
 ]
+
+[project.urls]
+Homepage = "https://github.com/wpunit13/spark-mutation-testing"
+Repository = "https://github.com/wpunit13/spark-mutation-testing"
+Issues = "https://github.com/wpunit13/spark-mutation-testing/issues"
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0"]

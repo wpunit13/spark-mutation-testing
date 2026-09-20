@@ -462,7 +462,7 @@ public final class MutantMetadata {
     private final String description;       // human-readable, e.g. "INNER -> CROSS"
     private final String coordinateHex;      // NodeCoordinate.toHex(), 16-char lowercase hex
     private final String astDiffSnippet;     // short textual before/after plan fragment, report-facing only
-    private final List<String> mappedTestIds; // immutable, from Test Impact Analysis
+    private final List<String> mappedTestIds; // immutable; pytest path: Test Impact Analysis (mapped tests); Maven fork path: every test the fork executed (no TIA yet — conservative whole-suite mapping)
 
     // All fields set exactly once at construction (constructor-injected); this type is immutable.
     // equals()/hashCode() are defined over mutantId alone (the canonical identity).
@@ -492,7 +492,7 @@ public enum MutantStatus { KILLED, SURVIVED, TIMED_OUT, ERRORED, NOT_APPLIED, SK
 `SKIPPED` is included in the POJO enum (used by the pre-flight cardinality
 gate, `ARCHITECTURE.md` §6.3) even though the spec's §4.3 four-state
 classification does not enumerate it; `SKIPPED` mutants are explicitly
-excluded from the Mutation Score denominator (§5.4) to keep the score formula
+excluded from the Mutation Score denominator (§5.3) to keep the score formula
 exactly as specified.
 
 `NOT_APPLIED` (WP-24, schema v2) marks a mutant whose rewrite never executed:
@@ -515,7 +515,8 @@ Mutation Score denominator and governed by
     "targetModules": ["my_pipeline.transforms"],
     "excludedMutators": ["CrossJoinMutator"],
     "timeoutMultiplier": 2.0,
-    "minMutationScore": 80.0
+    "minMutationScore": 80.0,
+    "timeoutEnforced": true
   },
   "summary": {
     "totalMutants": 0,
@@ -576,8 +577,65 @@ Mutation Score denominator and governed by
   characters (`ARCHITECTURE.md` §4.2/§4.4); any other length/casing is a
   contract violation to be caught by report-writer validation, not silently
   accepted.
+- `config.timeoutEnforced` (WP-25, additive) is `true` when the run enforced
+  a per-mutant deadline (Maven fork kill, PySpark watchdog, JUnit 5
+  in-process watchdog) and `false` for the pre-WP-25 echo-only era — the
+  JUnit 5 in-process path before its watchdog shipped. Consumers key on it
+  to interpret `TIMED_OUT` counts: a `false` report cannot contain
+  `TIMED_OUT` outcomes.
 
-### 5.4 SARIF Output
+### 5.4 Test Value Report — `test-value-report.json`
+
+Written alongside `mutation-report.json` (same directory, same run). It is a
+**separate artifact**: the `mutation-report.json` schema stays v2. Purpose:
+flag redundant test cases — the thing the mutation score cannot see (a suite
+of N useless tests + 1 strong test scores 100%).
+
+```json
+{
+  "killedTotal": 24,
+  "attributedKilled": 24,
+  "attributionCoverage": 1.0,
+  "tests": [
+    {
+      "testId": "tests/test_orders.py::test_exact_rows",
+      "mutantsRun": 24,
+      "soleKills": 10,
+      "sharedKills": 14,
+      "verdict": "LOAD_BEARING"
+    },
+    {
+      "testId": "tests/test_orders.py::test_count_only",
+      "mutantsRun": 24,
+      "soleKills": 0,
+      "sharedKills": 14,
+      "verdict": "REDUNDANT_CANDIDATE"
+    }
+  ]
+}
+```
+
+Semantics:
+
+- `soleKills` — mutants whose **only** failing test was this one. Removing the
+  test lets those mutants escape. `soleKills > 0` ⇒ `LOAD_BEARING`.
+- `sharedKills` — mutants this test fails under that at least one other test
+  also fails under. `soleKills == 0` ⇒ `REDUNDANT_CANDIDATE`: everything this
+  test catches, the rest of THIS suite catches too.
+- `attributionCoverage` — killed mutants with named failing tests / total
+  killed. Verdicts are only meaningful when coverage is high; `0.0` yields
+  `INSUFFICIENT_DATA` for every test (never a misleading accusation).
+- **Relative, not absolute**: redundancy is defined against the current suite.
+  Deleting a load-bearing test invalidates every `REDUNDANT_CANDIDATE` verdict
+  in the report.
+
+Attribution fidelity per path (see `developer-guide.md` §5.1): the Maven fork
+path captures all failing tests per mutant with
+`-Dspark.mutator.perTestAttribution=true` (otherwise the fork aborts at the
+first failure — first-killer-only); PySpark requires `per_test_attribution =
+true`; the JUnit 5 in-process path records none (`INSUFFICIENT_DATA`).
+
+### 5.5 SARIF Output
 
 The SARIF artifact is derived entirely from the same `mutants[]` array (no
 independent data collection): each `SURVIVED` mutant becomes one SARIF

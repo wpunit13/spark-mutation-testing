@@ -9,6 +9,9 @@ dependencies = [
 [tool.spark-mutator]
 output_dir = "target/spark-mutator-reports"
 min_mutation_score = 0.0
+# Run every mapped test per mutant (no fail-fast) so all failing tests are
+# recorded — the test-value report's sole-killer verdicts need them.
+per_test_attribution = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

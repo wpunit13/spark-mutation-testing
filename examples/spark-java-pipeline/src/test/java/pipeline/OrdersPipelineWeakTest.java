@@ -1,6 +1,5 @@
 package pipeline;
 
-import io.github.wpunit13.mutator.junit5.EnableSparkMutationTesting;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.RowFactory;
@@ -26,7 +25,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  * FILTER&rarr;NOT(P) mutants both still produce exactly 2 rows, so this suite
  * lets them survive.
  */
-@EnableSparkMutationTesting
 class OrdersPipelineWeakTest {
 
     private static SparkSession spark;

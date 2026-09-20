@@ -81,6 +81,9 @@ class SparkMutatorExtensionTest {
         System.clearProperty("spark.mutator.outputDirectory");
         System.clearProperty("spark.mutator.maxErroredCount");
         System.clearProperty("spark.mutator.maxNotAppliedRatio");
+        System.clearProperty("spark.mutator.timeoutMultiplier");
+        System.clearProperty("spark.mutator.timeoutEnforced");
+        SparkMutatorExtension.watchdogGraceMillis = 5_000L;
     }
 
     // -----------------------------------------------------------------------
@@ -130,6 +133,68 @@ class SparkMutatorExtensionTest {
             SparkSession session = SparkSession.getActiveSession().get();
             Dataset<Row> df = session.range(0, 5).toDF("id").filter("id > 2");
             assertEquals(2L, df.count());
+        }
+    }
+
+    /** Hangs only under an active mutant — the WP-25 canonical failure shape. */
+    @EnableSparkMutationTesting
+    static class HangingPipelineTestCase {
+        private static SparkSession spark;
+
+        // Own getOrCreate: prior fixtures in this suite may have stopped the
+        // shared SparkContext, so the fixture must be able to rebuild it
+        // (same pattern as StaticSessionLifecycleTestCase) to stay
+        // order-independent. Deliberately no @AfterAll stop: Spark is one
+        // context per JVM, so stopping here would kill the shared context
+        // other fixtures use.
+        @BeforeAll
+        static void setUp() {
+            spark = SparkSession.builder()
+                    .master("local[1]")
+                    .appName("HangingPipelineTestCase")
+                    .config("spark.sql.extensions", "io.github.wpunit13.mutator.MutatorSparkExtension")
+                    .config("spark.ui.enabled", "false")
+                    .getOrCreate();
+        }
+
+        @Test
+        void testHang() throws Exception {
+            Dataset<Row> df = spark.range(0, 5).toDF("id").filter("id > 2");
+            assertEquals(2L, df.count());
+            if (MutantRegistry.getInstance().getActiveMutantOrNull() != null) {
+                Thread.sleep(60_000); // mutated rewrite hangs the driver
+            }
+        }
+    }
+
+    /** Hangs AND ignores interrupts — trips the abandon-and-flush breaker. */
+    @EnableSparkMutationTesting
+    static class UnkillablePipelineTestCase {
+        private static SparkSession spark;
+
+        @BeforeAll
+        static void setUp() {
+            spark = SparkSession.builder()
+                    .master("local[1]")
+                    .appName("UnkillablePipelineTestCase")
+                    .config("spark.sql.extensions", "io.github.wpunit13.mutator.MutatorSparkExtension")
+                    .config("spark.ui.enabled", "false")
+                    .getOrCreate();
+        }
+
+        @Test
+        void testUnkillable() throws Exception {
+            Dataset<Row> df = spark.range(0, 5).toDF("id").filter("id > 2");
+            assertEquals(2L, df.count());
+            if (MutantRegistry.getInstance().getActiveMutantOrNull() != null) {
+                while (true) {
+                    try {
+                        Thread.sleep(60_000);
+                    } catch (InterruptedException swallowed) {
+                        // pretend the interrupt never happened
+                    }
+                }
+            }
         }
     }
 
@@ -242,6 +307,58 @@ class SparkMutatorExtensionTest {
         assertTrue(rootNode.has("schemaVersion"), "mutation report must contain schemaVersion");
         assertTrue(rootNode.has("summary"), "mutation report must contain summary");
         assertTrue(rootNode.has("mutants"), "mutation report must contain mutants");
+    }
+
+    @Test
+    void watchdogClassifiesHungMutantAsTimedOutAndLoopContinues() throws Exception {
+        // deadline = ceil(baseline × 0.001) → single-digit ms; the re-run
+        // (Spark query + hang) can never beat it.
+        System.setProperty("spark.mutator.timeoutMultiplier", "0.001");
+        SparkMutatorExtension.watchdogGraceMillis = 200L;
+
+        LauncherDiscoveryRequest request = LauncherDiscoveryRequestBuilder.request()
+                .selectors(DiscoverySelectors.selectClass(HangingPipelineTestCase.class))
+                .build();
+        LauncherFactory.create().execute(request);
+
+        JsonNode rootNode = mapper.readTree(tempDir.resolve("mutation-report.json").toFile());
+        assertTrue(rootNode.get("config").get("timeoutEnforced").asBoolean(),
+                "watchdog run must record timeoutEnforced=true");
+
+        int total = rootNode.get("summary").get("totalMutants").asInt();
+        assertTrue(total > 0, "catalog must be non-empty for this fixture");
+        assertEquals(total, rootNode.get("summary").get("timedOut").asInt(),
+                "every mutant must be TIMED_OUT (loop continued past the deadline hit)");
+        assertEquals(0, rootNode.get("summary").get("errored").asInt(),
+                "a continued loop must not synthesize missing-outcome ERROREDs");
+    }
+
+    @Test
+    void watchdogAbandonsLoopAndFlushesReportWhenWorkerUnkillable() throws Exception {
+        System.setProperty("spark.mutator.timeoutMultiplier", "0.001");
+        SparkMutatorExtension.watchdogGraceMillis = 200L;
+
+        LauncherDiscoveryRequest request = LauncherDiscoveryRequestBuilder.request()
+                .selectors(DiscoverySelectors.selectClass(UnkillablePipelineTestCase.class))
+                .build();
+        LauncherFactory.create().execute(request);
+
+        // WP-25 acceptance: the report survives the abandon — partial results
+        // with a TIMED_OUT tail beat no artifact.
+        Path reportFile = tempDir.resolve("mutation-report.json");
+        assertTrue(Files.exists(reportFile), "abandoned run must still flush the report");
+
+        JsonNode rootNode = mapper.readTree(reportFile.toFile());
+        assertTrue(rootNode.get("config").get("timeoutEnforced").asBoolean(),
+                "config=" + rootNode.get("config") + " summary=" + rootNode.get("summary"));
+        boolean sawTimedOut = false;
+        for (JsonNode mutant : rootNode.get("mutants")) {
+            JsonNode result = mutant.get("result");
+            if (result != null && "TIMED_OUT".equals(result.get("status").asText())) {
+                sawTimedOut = true;
+            }
+        }
+        assertTrue(sawTimedOut, "the hanging mutant must be classified TIMED_OUT");
     }
 
     @Test

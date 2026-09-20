@@ -82,6 +82,9 @@ _PROP_TIMEOUT_MULTIPLIER = "spark.mutator.timeoutMultiplier"
 _PROP_MIN_MUTATION_SCORE = "spark.mutator.minMutationScore"
 _PROP_MAX_ERRORED_COUNT = "spark.mutator.maxErroredCount"
 _PROP_MAX_NOT_APPLIED_RATIO = "spark.mutator.maxNotAppliedRatio"
+# WP-25: the Python loop always enforces the per-mutant deadline, so the
+# report's config echo records timeoutEnforced = true (schema §5.3).
+_PROP_TIMEOUT_ENFORCED = "spark.mutator.timeoutEnforced"
 
 # Stash key under which the active _MutationSession is stored on the pytest
 # config; the single source of truth for "is the plugin active".
@@ -177,13 +180,16 @@ def pytest_runtest_logreport(report) -> None:
         if report.when in ("call", "setup"):
             session.baseline_failed = True
     elif session.phase == "mutation" and report.when in ("call", "setup"):
-        # Per-mutant fail-fast collector: the loop breaks on the first call-
-        # or setup-phase failure it observes. A mutation that breaks a fixture
-        # (setup) is as much a kill as one that breaks an assertion (call):
-        # both prove the mutant changed observable behavior. Classifying the
-        # former as SURVIVED would deflate the mutation score.
+        # Per-mutant failure collector: a call- or setup-phase failure is a
+        # kill (a mutation that breaks a fixture is as much a kill as one
+        # that breaks an assertion). With fail-fast (default) the loop breaks
+        # on the first failure; with per_test_attribution every mapped test
+        # runs and ALL failures are recorded, feeding the test-value report's
+        # sole-killer computation.
         session.mutation_call_failed = True
         session.mutation_failed_nodeid = report.nodeid
+        if report.nodeid not in session.mutation_failed_nodeids:
+            session.mutation_failed_nodeids.append(report.nodeid)
 
 
 def pytest_collection_modifyitems(session, config, items) -> None:
@@ -347,6 +353,9 @@ class _MutationSession:
         self.driver_unresponsive_error: Exception | None = None
         self.mutation_call_failed = False
         self.mutation_failed_nodeid: str | None = None
+        # Every mapped test that failed under the active mutant (fail-fast
+        # records at most the first; per_test_attribution records all).
+        self.mutation_failed_nodeids: list[str] = []
         self._engine_config_applied = False
         # Epoch-millis lower bound for the §3.2 diff-and-drop reset: state
         # created before the baseline started counts as pre-existing.
@@ -407,6 +416,7 @@ class _MutationSession:
         system.setProperty(_PROP_MIN_MUTATION_SCORE, str(self.config.min_mutation_score))
         system.setProperty(_PROP_MAX_ERRORED_COUNT, str(self.config.max_errored_count))
         system.setProperty(_PROP_MAX_NOT_APPLIED_RATIO, str(self.config.max_not_applied_ratio))
+        system.setProperty(_PROP_TIMEOUT_ENFORCED, "true")
         self._engine_config_applied = True
 
     def _set_file_path_hint(self, nodeid: str) -> None:
@@ -565,6 +575,7 @@ class _MutationSession:
         )
         self.mutation_call_failed = False
         self.mutation_failed_nodeid = None
+        self.mutation_failed_nodeids = []
         self.driver_unresponsive_error = None
         self.bridge.set_active_mutant(mutant_id)
         spark = self.spark
@@ -576,6 +587,10 @@ class _MutationSession:
             deadline, self._make_timeout_closure(mutant_id, spark.sparkContext)
         )
         try:
+            # per_test_attribution trades fail-fast speed for a complete kill
+            # matrix: every mapped test runs so ALL failing tests are recorded
+            # (the test-value report's sole-killer computation needs them).
+            fail_fast = not self.config.per_test_attribution
             for nodeid in mapped:
                 item = self.items_by_nodeid.get(nodeid)
                 if item is None:
@@ -585,9 +600,9 @@ class _MutationSession:
                     )
                     continue
                 item.ihook.pytest_runtest_protocol(item=item, nextitem=None)
-                if self.mutation_call_failed:
-                    # Fail-fast: the first call-phase failure halts the
-                    # remaining mapped tests for this mutant.
+                if self.mutation_call_failed and fail_fast:
+                    # Fail-fast: the first call- or setup-phase failure halts
+                    # the remaining mapped tests for this mutant.
                     break
         finally:
             self.watchdog.disarm()
@@ -604,9 +619,19 @@ class _MutationSession:
         if self.driver_unresponsive_error is not None:
             return "ERRORED", f"driver unresponsive: {self.driver_unresponsive_error}"
         if self.mutation_call_failed:
+            detail = (
+                f"test failed under mutation: {self.mutation_failed_nodeid}"
+            )
+            if self.mutation_failed_nodeids:
+                # Same canonical block the Maven fork path appends; the
+                # test-value report parses it for sole-killer attribution.
+                lines = "\n".join(
+                    f"  - {nodeid}" for nodeid in self.mutation_failed_nodeids
+                )
+                detail += f"\n\nFailing tests:\n{lines}"
             return (
                 "KILLED",
-                f"test failed under mutation: {self.mutation_failed_nodeid}",
+                detail,
             )
         # WP-24: the rewrite must have executed for a SURVIVED to be honest.
         # The engine-side tracker records the applied fact at rewrite time;

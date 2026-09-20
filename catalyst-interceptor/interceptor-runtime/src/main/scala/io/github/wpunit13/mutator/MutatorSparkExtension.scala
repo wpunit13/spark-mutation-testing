@@ -50,11 +50,23 @@ import org.apache.spark.sql.SparkSessionExtensions
  * post-hoc shape, the active mutant's coordinate always recurs in the mutant
  * fork; because the rewrite happens at the optimizer entry, every mutation is
  * actually executed.
+ *
+ * WP-26 zero-touch fork path: apply() also performs the §7 harness
+ * obligations for the externally-orchestrated (Maven plugin) path —
+ * activation of the fork's mutant at session-extension init and the
+ * catalog.json / applied-marker handoff at JVM exit — so a fork needs no
+ * test-code anchor. See [[ForkHandoffShutdownHook]]. The JUnit 5 bridge
+ * (SparkMutatorExtension) keeps owning the standalone in-process loop and
+ * stays as a harmless idempotent co-writer in annotated forks.
  */
 class MutatorSparkExtension extends (SparkSessionExtensions => Unit) {
 
   override def apply(extensions: SparkSessionExtensions): Unit = {
     DriverFatalShutdownHook.register()
+    // No-op outside fork mode (no spark.mutator.active.mutant); in fork mode
+    // it activates the mutant and fail-loudly loads catalog.json.
+    MutantBootstrap.activateFromSystemProperties()
+    ForkHandoffShutdownHook.register()
     extensions.injectPostHocResolutionRule(
       _ => new CatalystMutationRule(ShimDispatcher.activeShim, CatalystMutationRule.PostHoc))
     extensions.injectOptimizerRule(

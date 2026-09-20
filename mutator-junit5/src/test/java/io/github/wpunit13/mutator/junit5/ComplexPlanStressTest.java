@@ -67,18 +67,22 @@ import org.junit.platform.launcher.core.LauncherFactory;
  * <p>Pipeline (per mutant re-run, fresh session):
  *
  * <pre>
- * srcA(6) ⋈ srcC(3) → +window rn → filter#1 (valA&gt;10 AND rn≤3, cast drift)
+ * srcA(6) ⋈ srcC(3) → +window rn → filter#1 (valA&gt;10 AND rn≤1, cast drift)
  *   → select → CACHE ─┬─ agg (sum by grp)          → HARDENED exact-rows assert
  *                     └─ ⋈ srcB → parquet WRITE → READ back → twin filter
  *                          (valA&gt;15, schema-overlapping) → LEFT join → WEAK count assert
  * </pre>
  *
- * <p>Attribution instrument: filter#1 sits on the hardened branch (its FALSE /
- * NOT / keep-right mutants must KILL via the exact-totals assert; its
- * keep-left mutant keeps the same rows and must SURVIVE). The twin sits on
- * the weak branch behind a LEFT join (its mutants must SURVIVE — the count is
- * invariant). If the identity fallback re-identifies a twin mutant onto
- * filter#1 (or vice versa), one of these statuses flips and the test fails.
+ * <p>Attribution instrument: filter#1 sits on the hardened branch — rn ≤ 1 is
+ * deliberately BINDING (2 rows per grp), so every filter#1 mutant (FALSE / NOT /
+ * keep-left / keep-right) changes the cached rows and must KILL via the
+ * exact-totals assert; the same bound makes the WINDOW family observable
+ * (INVERT_WINDOW_ORDER swaps which row gets rn=1 → KILLED; frame truncation on
+ * a frameless row_number → NOT_APPLIED/SURVIVED). The twin sits on the weak
+ * branch behind a LEFT join (its mutants must SURVIVE — the count is
+ * invariant) and provides the SURVIVED contrast. If the identity fallback
+ * re-identifies a twin mutant onto filter#1 (or vice versa), one of these
+ * statuses flips and the test fails.
  */
 class ComplexPlanStressTest {
 
@@ -287,9 +291,9 @@ class ComplexPlanStressTest {
     }
 
     /**
-     * The shared complex pipeline. Unmutated expectations: agg = [(g1,40),
-     * (g2,35), (g3,20)]; the write-side inner join keeps ids 1, 4, 5; the weak
-     * left-join count is 3.
+     * The shared complex pipeline. Unmutated expectations: agg = [(g1,15),
+     * (g3,20)] (rn ≤ 1 keeps only each grp's lowest-id valA>10 row); the
+     * write-side inner join keeps ids 1, 5; the weak left-join count is 2.
      */
     private static void runPipeline(SparkSession spark, String parquetPath) {
         // Multiple sources + USING join (dedup Project) + cast drift below
@@ -299,9 +303,13 @@ class ComplexPlanStressTest {
         Dataset<Row> w = dim.withColumn("rn",
                 functions.row_number().over(Window.partitionBy("grp").orderBy("id")));
 
-        // AND filter → keep-left / keep-right / FALSE / NOT candidates
+        // AND filter → keep-left / keep-right / FALSE / NOT candidates.
+        // rn ≤ 1 is deliberately BINDING (2 rows per grp): it makes window
+        // mutations observable — INVERT_WINDOW_ORDER swaps which row gets
+        // rn=1 and flips the surviving set, giving the WINDOW family kill
+        // power on this plan (rn ≤ 3 never bound → designed SURVIVED only).
         Dataset<Row> filtered = w.filter(
-                functions.col("valA").gt(10).and(functions.col("rn").leq(3)));
+                functions.col("valA").gt(10).and(functions.col("rn").leq(1)));
 
         // Alias-select + cache, used twice below
         Dataset<Row> cached = filtered.select("id", "grp", "valA").cache();
@@ -309,13 +317,11 @@ class ComplexPlanStressTest {
         // Aggregation over the cached branch — hardened: exact totals.
         Dataset<Row> agg = cached.groupBy("grp").agg(functions.sum("valA").as("total"));
         List<Row> aggRows = agg.orderBy("grp").collectAsList();
-        assertEquals(3, aggRows.size());
+        assertEquals(2, aggRows.size());
         assertEquals("g1", aggRows.get(0).get(0));
-        assertEquals(40L, aggRows.get(0).get(1));
-        assertEquals("g2", aggRows.get(1).get(0));
-        assertEquals(35L, aggRows.get(1).get(1));
-        assertEquals("g3", aggRows.get(2).get(0));
-        assertEquals(20L, aggRows.get(2).get(1));
+        assertEquals(15L, aggRows.get(0).get(1));
+        assertEquals("g3", aggRows.get(1).get(0));
+        assertEquals(20L, aggRows.get(1).get(1));
 
         // Second use of the cache + parquet write-then-read (plan boundary).
         Dataset<Row> writeDf = cached.join(srcB(spark), "id").select("id", "grp", "valA", "valB");
@@ -327,7 +333,7 @@ class ComplexPlanStressTest {
         Dataset<Row> twin = readBack.select("id", "grp", "valA")
                 .filter(functions.col("valA").gt(15));
         Dataset<Row> finalDf = agg.join(twin, "grp", "left");
-        assertEquals(3, finalDf.collectAsList().size());
+        assertEquals(2, finalDf.collectAsList().size());
     }
 
     private static Dataset<Row> srcA(SparkSession spark) {
@@ -439,6 +445,8 @@ class ComplexPlanStressTest {
         assertTrue(killed > 0, "[" + leg + "] Hardened branch must kill mutants:\n" + dump);
         assertTrue(survived > 0, "[" + leg + "] Weak branch must let mutants survive:\n" + dump);
 
+        assertFamilyCoverage(report, leg);
+
         // Every applied mutant carries attribution evidence.
         for (JsonNode m : report.get("mutants")) {
             if (!m.get("result").get("status").asText().equals("ERRORED")) {
@@ -447,6 +455,66 @@ class ComplexPlanStressTest {
                                 + " must carry a diff snippet");
             }
         }
+    }
+
+    /**
+     * Family-level pins: every mutator family must be discovered AND
+     * classified on the complex plan — not just the FILTER attribution
+     * instrument. Expectations are designed from the pipeline shape
+     * ({@code runPipeline} javadoc), not from whatever the current run
+     * happens to produce.
+     */
+    private void assertFamilyCoverage(JsonNode report, String leg) {
+        Map<String, List<String>> byFamily = new LinkedHashMap<>();
+        for (JsonNode m : report.get("mutants")) {
+            byFamily.computeIfAbsent(m.get("operatorType").asText(), k -> new ArrayList<>())
+                    .add(m.get("result").get("status").asText());
+        }
+
+        // JOIN: LEFT mutants are semantically equivalent on this pipeline
+        // (srcC covers every grp; every srcB id is cached) → designed
+        // SURVIVED; CROSS/ANTI change rows → KILLED; ANTI on the write join
+        // drops valB → designed schema ERRORED (guarded globally above).
+        assertFamilyStatuses(byFamily, "JOIN", leg,
+                "must include KILLED and SURVIVED, never NOT_APPLIED",
+                s -> s.contains("KILLED") && s.contains("SURVIVED") && !s.contains("NOT_APPLIED"));
+
+        // WINDOW: rn ≤ 1 binds (2 rows per grp), so INVERT_WINDOW_ORDER swaps
+        // which row gets rn=1 → KILLED. TRUNCATE_WINDOW_FRAME on a frameless
+        // row_number is unobservable → SURVIVED, or NOT_APPLIED. Must never
+        // schema-crash.
+        assertFamilyStatuses(byFamily, "WINDOW", leg,
+                "must include KILLED, never ERRORED",
+                s -> s.contains("KILLED") && !s.contains("ERRORED"));
+
+        // AGGREGATE: sum mutations change the exact-totals assert → KILLED.
+        assertFamilyStatuses(byFamily, "AGGREGATE", leg,
+                "must include KILLED",
+                s -> s.contains("KILLED"));
+
+        // PROJECT: INJECT_NULL on the cached branch changes totals → KILLED;
+        // on the weak branch the count is invariant → SURVIVED.
+        assertFamilyStatuses(byFamily, "PROJECT", leg,
+                "must include KILLED and SURVIVED",
+                s -> s.contains("KILLED") && s.contains("SURVIVED"));
+
+        // FILTER: both branches designed (see the attribution instrument).
+        assertFamilyStatuses(byFamily, "FILTER", leg,
+                "must include KILLED and SURVIVED",
+                s -> s.contains("KILLED") && s.contains("SURVIVED"));
+    }
+
+    private static void assertFamilyStatuses(
+            Map<String, List<String>> byFamily,
+            String family,
+            String leg,
+            String expectation,
+            java.util.function.Predicate<List<String>> pin) {
+        List<String> statuses = byFamily.get(family);
+        assertNotNull(statuses,
+                "[" + leg + "] " + family + " mutants must be discovered on the complex plan");
+        assertTrue(pin.test(statuses),
+                "[" + leg + "] " + family + " " + expectation + " but was: " + statuses);
     }
 
     private Map<String, String> statusMap(JsonNode report) {

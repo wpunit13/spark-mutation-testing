@@ -1,6 +1,5 @@
 package pipeline;
 
-import io.github.wpunit13.mutator.junit5.EnableSparkMutationTesting;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.RowFactory;
@@ -24,7 +23,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  * changes the rows in any way (JOIN&rarr;ANTI, FILTER&rarr;NOT(P), a nulled
  * column, &hellip;) is killed here.
  */
-@EnableSparkMutationTesting
 class OrdersPipelineHardenedTest {
 
     private static SparkSession spark;

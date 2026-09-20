@@ -30,6 +30,7 @@ _KNOWN_KEYS = frozenset(
         "output_dir",
         "requeue_on_crash",
         "control_channel_timeout_seconds",
+        "per_test_attribution",
     }
 )
 
@@ -47,6 +48,7 @@ class SparkMutatorConfig:
     output_dir: str = "target/spark-mutator-reports"
     requeue_on_crash: bool = False
     control_channel_timeout_seconds: float = 5.0
+    per_test_attribution: bool = False
 
     @classmethod
     def from_toml(cls, path) -> "SparkMutatorConfig":
@@ -118,6 +120,10 @@ class SparkMutatorConfig:
             kwargs["control_channel_timeout_seconds"] = _coerce_float(
                 "control_channel_timeout_seconds",
                 table["control_channel_timeout_seconds"],
+            )
+        if "per_test_attribution" in table:
+            kwargs["per_test_attribution"] = _coerce_bool(
+                "per_test_attribution", table["per_test_attribution"]
             )
 
         config = cls(**kwargs)

@@ -93,7 +93,7 @@
         <artifactId>maven-surefire-plugin</artifactId>
         <configuration>
           <includes>
-            <include>**/OrdersPipeline*Test.java</include>
+            <include>**/*Pipeline*Test.java</include>
           </includes>
         </configuration>
       </plugin>
@@ -117,6 +117,7 @@
             <configuration>
               <includes>
                 <include>**/OrdersPipelineWeakTest.java</include>
+                <include>**/PrecisionPipelineWeakTest.java</include>
               </includes>
             </configuration>
           </plugin>
@@ -134,6 +135,8 @@
             <configuration>
               <includes>
                 <include>**/OrdersPipelineHardenedTest.java</include>
+                <include>**/PrecisionPipelineHardenedTest.java</include>
+                <include>**/ComplexPipelineHardenedTest.java</include>
               </includes>
             </configuration>
           </plugin>

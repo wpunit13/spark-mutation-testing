@@ -22,7 +22,7 @@ loop* and *where it runs*.
 | Orchestrator | `MutateMojo` + `MutationLoopCoordinator` (in the Maven JVM) | `SparkMutatorExtension` (in the test JVM) |
 | Test runner | Surefire forks one JVM per mutant | JUnit 5 runs tests reflectively in-process |
 | Isolation | Process-level (fresh JVM per mutant) | In-process, cache-reset between mutants |
-| Use case | CI / enterprise gate; can parallelize | IDE, quick feedback, zero-plugin `mvn test` |
+| Use case | CI / enterprise gate; **sequential today** — parallel fork execution is planned (WP-28) | IDE, quick feedback, zero-plugin `mvn test` |
 
 ### 1.1 Maven plugin path
 
@@ -46,11 +46,14 @@ does four things on `mvn spark-mutation-testing:mutate`:
 4. **Run the mutation loop** (`MutationLoopCoordinator`): baseline → discover →
    fork-per-mutant → classify → merge → report → gate.
 
-> **At least one annotated class must run in each fork.** The
+> **At least one annotated class must run in each fork** — unless the engine-side
+> handoff is active, which is the default since WP-26: `MutatorSparkExtension`
+> (injected into `argLine` by the plugin itself) performs all three §7
+> obligations, so a pom-only setup needs **no annotation at all**. The
 > `SparkMutatorExtension` bridge (via `@EnableSparkMutationTesting`, a shared
-> base class, or equivalent registration) is what writes `catalog.json` on
-> baseline completion and the applied markers on mutant runs. If no annotated
-> class executes, the baseline fork hands back an empty catalog and the Mojo
+> base class, or equivalent registration) remains as an idempotent co-writer
+> when present. If neither runs — e.g. no Spark session is ever created in the
+> fork — the baseline fork hands back an empty catalog and the Mojo
 > writes a **silent empty report** (zero mutants, score 0.0%, exit 0) — check
 > the `Detected …` / mutant-count log lines to confirm discovery actually ran.
 
@@ -86,6 +89,126 @@ including Gradle's `test` task (thin path, no plugin):
 > mandatory `--add-opens` set (the canonical list is the root POM's
 > `spark.test.jvm.args`, reproduced in [`GRADLE.md`](GRADLE.md) §3) — without
 > it the driver dies with `InaccessibleObjectException` before any test runs.
+
+### 1.3 Runtime sizing (plan before you run)
+
+Wall-clock for the fork loop decomposes into three additive parts:
+
+```
+T ≈ T_baseline
+  + M × S_fork                                  // per-mutant fork startup
+  + Σ per-mutant test execution                 // see mix below
+```
+
+- `M` = catalogued mutants, `S_fork` = JVM + SparkSession startup per fork
+  (box-dependent — measure it, don't guess; see the log line below).
+- Per-mutant deadline = `ceil(T_baseline × timeoutMultiplier)`; a `TIMED_OUT`
+  mutant costs the *full* deadline, a `SURVIVED` one costs its mapped tests'
+  runtime, a `KILLED` one usually dies fast (fail-fast) — but the fixed
+  `S_fork` is paid either way.
+
+The loop logs one line per mutant so a pilot run measures all three terms
+directly (`forkStartupMs` = fork wall − surefire suite time ≈ JVM spawn +
+booter; the SparkSession startup paid in `@BeforeAll` rides inside the suite
+side of that subtraction):
+
+```
+baseline forkStartupMs=712 execMs=10819
+mutant 004b557d8a972fbb verdict=KILLED forkStartupMs=783 execMs=11824 deadlineMs=21638
+```
+
+**Measured reference point** (`examples/spark-java-pipeline`, Spark 3.5.3
+`local[1]`, JDK 17, 3 test classes, `M` = 138, 2026-09-20):
+
+```
+T_baseline                                  10.8 s
+S_fork        138 × ~5.4 s (0.4 JVM + ~5 session) ≈ 12.4 min
+test exec     138 × ~0.4 s                  ≈ 0.9 min
+                                            ─────────
+measured mutant wall                        ≈ 13.7 min  (+ 10.8 s baseline)
+```
+
+The measured fact that reshapes the planning: per-mutant cost is ~*uniform*
+(mean 5.9 s; KILLED 5.8 s ≈ SURVIVED 6.1 s ≈ NOT_APPLIED 5.8 s) because ~93%
+of it is fixed fork overhead — JVM spawn + booter (0.4 s) plus the fresh
+SparkSession (~5 s) — not test execution (~0.4 s). Fail-fast barely helps: a
+killed fork still pays the full session startup. Wall-clock is therefore
+≈ `M × 5.9 s`, linear in the catalog with a steep fixed slope; a 1000-mutant
+catalog budgets ~98 min serial on this machine class.
+
+**Sharding (opt-in).** When the serial wall hurts, split the catalog across N
+CI jobs — each runs the same goal with `-Dspark.mutator.shards=N
+-Dspark.mutator.shard=i` and executes only its index slice (`i % N == shard`;
+discovery/baseline is never sharded):
+
+```
+T_sharded ≈ T_baseline + ceil(M / N) × 5.9 s      (N parallel CI jobs)
+```
+
+Resource note: each concurrent fork is a full Spark driver JVM — budget
+~2 GB heap per worker on a shared runner, and keep sessions' `local[k]` ×
+workers ≤ cores. Measured `N` = 2 on the example: 69 + 69 mutants, per-mutantId
+verdicts identical to the `N` = 1 run (re-verified after the per-shard surefire
+isolation landed: sequential shard vs `N` = 1, 0 diffs).
+
+**One command instead of N + 1.** `-Dspark.mutator.workers=N` runs the whole
+sharded run in-process: baseline once, N child Maven processes (loop-only,
+parent's deadline), in-process merge, gates post-join. Same resource note
+applies — each worker is a full Spark driver fork (~2 GB heap + ~0.5 GB child
+Maven JVM). Measured on the example: per-mutantId verdicts identical to the
+serial run (0 diffs), so `workers` is gate-safe. The one requirement it puts
+on **your test fixtures**: never write to fixed shared paths (e.g.
+`target/my-fixture`) — concurrent forks collide on Hadoop's `_temporary`
+staging and a `FileNotFound` ERROR kills the fork, producing a false KILLED
+for whatever mutant was active. Use a per-fork scratch directory
+(`Files.createTempDirectory`) for any parquet/file fixture, exactly like the
+example's suites do. Quick iteration and CI gates are both fine on `workers`;
+CI sharding (sequential jobs) remains the alternative when you want one
+report per machine with no shared-filesystem assumptions.
+
+Planning rules of thumb:
+
+1. **Pilot first.** Run the loop once on a small module or with
+   `-Dspark.mutator.excludedMutators=WINDOW,OTHER` and read the per-mutant
+   timing lines: they give `S_fork`, the verdict mix, and the deadline
+   directly — no stopwatch needed.
+2. **The in-process path has no fork startup** (`mvn test` reuses the
+   session) — for local iteration on large catalogs it is the fast loop; the
+   fork loop is the CI-grade one. Per-mutant deadlines are enforced here too
+   since WP-25: a hung mutant is classified `TIMED_OUT` and the loop
+   continues (§6.2).
+3. **Shrink the catalog, not the deadline.** `excludedMutators` removes whole
+   families; lowering `timeoutMultiplier` below 2.0 risks flaky `TIMED_OUT`
+   verdicts on legitimately slow mutants.
+4. **Scale out with CI sharding** (`spark.mutator.shards`, §3.2) — measured
+   verdict-identical at `N` = 2. An in-JVM parallel fork pool was evaluated
+   and rejected for now: per-mutant cost is fixed-overhead-dominated, so a
+   local pool's realistic ceiling on a 2 GB/worker budget is ~2× on this
+   machine class, not worth the concurrent-`executeMojo` risk.
+
+### 1.4 Flaky baselines
+
+Contract: **any baseline failure aborts the entire run.** This is deliberate —
+a red baseline makes every subsequent classification meaningless (the score
+would measure the baseline bug, not the suite). There is no retry.
+
+Operational guidance when it bites:
+
+1. **Treat the flake as the finding.** A test that intermittently fails also
+   intermittently *passes* — under mutation, that same test flips verdicts
+   between runs and destroys the deterministic-id reproducibility the report
+   depends on. Fix it or quarantine it before mutation runs, not after.
+2. **Quarantine via Surefire** — `<excludes>` or a profile, the same
+   mechanism the weak/hardened example profiles use. Quarantined tests simply
+   don't run; mutants they would have killed are honestly `SURVIVED` in the
+   report.
+3. **Nondeterministic assertions are flakes in waiting** — sort collections
+   before comparing, assert floating point with tolerance, never assert on
+   wall-clock or row *order* without an explicit `orderBy`.
+
+Retry-on-flake is a deliberate non-feature: a mutant whose mapped tests
+sometimes fail and sometimes pass is not a verdict, it is a test bug — a
+retry would launder it into whichever outcome the gate prefers.
 
 ---
 
@@ -160,6 +283,8 @@ fork on this channel.
 | `spark.mutator.outputDirectory` | file path | Report/output directory (same key as the user-facing config — one key, both surfaces) |
 | `spark.mutator.targetModules` | comma-separated module-path prefixes | Discovery registers a candidate only when the current file-path hint starts with one of the prefixes. Blank/unset ⇒ no filtering. With the property set while the hint is still the default `unknown` (no harness fed one), NOTHING is registered and a single warning is emitted — fail-safe, because silent full-catalog behavior would be the "every mutant survived" failure mode in disguise |
 | `spark.mutator.excludedMutators` | comma-separated OperatorType names (`JOIN`, `FILTER`, `AGGREGATE`, `WINDOW`, `PROJECT`, `OTHER`; case-insensitive) | Discovery skips excluded operators; the match/rewrite path refuses them even if a stale catalog entry exists (observable skip, never an error). Unrecognized tokens are ignored with a one-time warning. The Python path additionally accepts legacy mutator display names, enforced in the pytest plugin |
+| `spark.mutator.skipBaseline` | `true` \| `false` | **Internal — set only by the single-command orchestrator's children.** Skips the baseline fork (the parent already ran discovery); requires `spark.mutator.deadlineMillis` |
+| `spark.mutator.deadlineMillis` | positive integer | **Internal — set only by the single-command orchestrator's children.** The parent's computed per-mutant deadline, passed down so children never recompute it under contention (determinism) |
 
 The bridge reads these once at JVM startup and drives `MutantRegistry`, so the
 activation logic is **framework-agnostic** (JUnit 5, ScalaTest, … all just call
@@ -182,10 +307,15 @@ table below) applies. The same values can be supplied per-invocation instead:
 | `minMutationScore` | `spark.mutator.minMutationScore` | `0.0` | score floor (`0.0` = gate off) |
 | `maxErroredCount` | `spark.mutator.maxErroredCount` | `0` | WP-24: max real-failure ERRORED (dead sessions, shim violations, mutation crashes); zero tolerance by default, negative disables |
 | `maxNotAppliedRatio` | `spark.mutator.maxNotAppliedRatio` | `0.20` | WP-24: max ratio of designed not-applied mutants (`notApplied / (total − skipped)`); negative disables |
+| `perTestAttribution` | `spark.mutator.perTestAttribution` | `false` | runs every mapped test per killed mutant (no fail-fast) so the report names ALL failing tests — feeds the test-value report's sole-killer verdicts; costs runtime on killed mutants |
 | `targetModules` | `spark.mutator.targetModules` | *(empty)* | comma-separated module-path prefixes limiting Discovery (see §3.1 for the engine-side semantics) |
 | `excludedMutators` | `spark.mutator.excludedMutators` | *(empty)* | comma-separated OperatorType names excluded from mutation; echoed into the report's `config.excludedMutators` block |
 | `exitProcessOnGateFailure` | `spark.mutator.exitProcessOnGateFailure` | `true` | `false` ⇒ a gate violation throws `MojoFailureException` (Maven exit code 1, reactor honors `--fail-at-end`/`--fail-never`) instead of terminating the JVM with the dedicated exit code 2 — the multi-module escape hatch |
 | `injectAddOpens` | `spark.mutator.injectAddOpens` | `true` | inject Spark's mandatory modular-runtime JVM args (the `--add-opens` set) into Surefire's `argLine`; no-op on Java 8 |
+| `shards` | `spark.mutator.shards` | `1` | CI sharding: total shard count N. Each CI job runs the same goal with `-Dspark.mutator.shards=N -Dspark.mutator.shard=i`; the catalog is filtered by index (`i % N == shard`), slices are deterministic and disjoint, and the N jobs run in parallel. `< 1` fails the build; `> 8` warns (each shard is a full Spark driver fork — see §1.3's resource note). Discovery is never sharded; every shard runs the full baseline. WP-24 gates evaluate on each shard's slice — the mutation score is per-slice until a merge-across-shards step exists |
+| `shard` | `spark.mutator.shard` | `0` | this worker's shard index, in `[0, shards)`; out-of-range fails the build. When sharding is active the report's `config` block echoes `shards`/`shard` (default reports stay byte-identical) |
+| `mergeOnly` | `spark.mutator.mergeOnly` | `false` | post-join merge for CI sharding: skips baseline + loop, reads the full catalog + every shard's `outcomes/<id>.json`, writes the combined reports, then evaluates the gates once on the merged counts. Fails loudly if any catalogued mutant lacks an outcome (a shard died — rerun it, then merge) |
+| `workers` | `spark.mutator.workers` | `1` | single-command orchestration: the parent runs the baseline once, spawns N child Maven processes (one shard each, parent's deadline), waits, merges in-process, gates post-join. Default 1 = serial path, byte-identical. Each worker ≈ 2 GB Spark fork + ~0.5 GB child Maven JVM; `< 1` fails, `> 8` warns. Mutually exclusive with explicit `shards`/`shard` and with `mergeOnly`. Measured verdict-identical to the serial run; your test fixtures must use per-fork scratch paths, not fixed `target/` paths (see §1.3) |
 
 
 All parameters in a single `<configuration>` block:
@@ -404,6 +534,28 @@ Written to the report directory (see §3.2):
 | `mutation-report.json` | schema v2 (`docs/CONTRACTS.md` §5.3; v2 adds the WP-24 `NOT_APPLIED` split) |
 | `mutation-report.sarif` | SARIF 2.1.0; `SURVIVED` = `warning`, `ERRORED` = `error`, `KILLED`/`TIMED_OUT` omitted |
 | `mutation-report.html` | self-contained (inline CSS, no external assets) |
+| `test-value-report.json` / `.html` | per-test kill attribution (see below) |
+
+### 5.1 Test value report (per-test redundancy flag)
+
+`test-value-report.{json,html}` answers a question the mutation score cannot:
+**which test cases are redundant?** A test is `LOAD_BEARING` when at least one
+mutant exists whose *only* failing test is this one (remove the test and that
+mutant escapes); a test with zero sole kills is a `REDUNDANT_CANDIDATE` —
+everything it catches, another test in this run also catches.
+
+Verdicts are **relative to the current suite**, never absolute: delete the
+load-bearing test and the "redundant" ones suddenly matter. Verdicts also
+require per-mutant failing-test attribution:
+
+| Path | Attribution | Verdicts |
+|---|---|---|
+| Maven fork (Java/Scala) | all failing tests per mutant with `spark.mutator.perTestAttribution=true`; otherwise the fork aborts at the first failure (first killer only) | meaningful with the flag; biased without |
+| PySpark | all failing tests only with `per_test_attribution = true` (otherwise fail-fast records the first killer) | meaningful with the flag; biased without |
+| JUnit 5 in-process (incl. Gradle thin path) | none recorded | `INSUFFICIENT_DATA` |
+
+`attributionCoverage` (killed mutants with named failing tests / total killed)
+quantifies the fidelity; the HTML report carries the same caveat.
 
 Any catalogued mutant with no recorded outcome is synthesized as `ERRORED`, so
 the schema never carries a null result. The whole pipeline is driven by
@@ -441,16 +593,24 @@ custom runner) implements the same contract against public `mutator-core` APIs:
 | 2 | After all tests ran | `baseline` | `MutationCatalogIo.writeCatalogJson(outputDir, MutationCatalogAccess.allEntries())` — the baseline fork hands Discovery's catalog to the coordinator. |
 | 3 | After all tests ran | `mutant` | If `AppliedMutantTracker.lastOrNull() == activeMutant`, write `AppliedMarkerStore.write(outputDir, activeMutant)`; otherwise throw. A mutation that never executed must never be classified KILLED or SURVIVED. |
 
+**Resolved by WP-26 for the fork path:** when the fork is driven by the Maven
+plugin, `MutatorSparkExtension` performs all three obligations itself
+(activation at session-extension init, `catalog.json` / applied markers from
+the `ForkHandoffShutdownHook` at JVM exit) — the table above then only applies
+to harnesses that must coexist with engines older than WP-26, or to frameworks
+whose fork also runs the standalone in-process loop.
+
 `outputDir` is `MutantBootstrap.outputDirectoryOrNull()`. Optional:
 `TestContextTracker.setCurrentTestId(...)` / `clearCurrentTestId()` around each
 test enables test-impact mapping (`mappedTestIds`), which the coordinator uses
 as the per-mutant `-Dtest=` filter.
 
-> **WP-26 (planned):** these three obligations are scheduled to move into
-> `MutatorSparkExtension` itself (config-activated, shutdown-hook handoff),
-> which makes the Maven plugin path pom-only — no harness glue, no annotation.
-> Until then, any JUnit 5 suite gets them for free via
-> `@EnableSparkMutationTesting`; other frameworks implement them per §7.
+> **WP-26 (implemented):** these three obligations moved into
+> `MutatorSparkExtension` (config-activated, shutdown-hook handoff), making the
+> Maven plugin path pom-only — no harness glue, no annotation. The JUnit 5
+> bridge stays for the standalone in-process loop and co-writes the same files
+> idempotently when an annotated class runs; other frameworks can still
+> implement the contract per §7.
 
 Failing loudly is part of the contract. A harness that swallows an unknown-
 mutant error or skips the marker turns a broken handoff into "every mutant
@@ -462,6 +622,45 @@ Two boundaries of the contract: (a) it covers the **externally-orchestrated**
 standalone mode is an optional extra, not an obligation; (b) the coordinator,
 not the harness, writes outcomes and final reports — the harness only ever
 writes `catalog.json` and applied markers.
+
+---
+
+## 8. Cutting a release
+
+The full procedure, guard rails, and failure modes live in
+[`RELEASING.md`](RELEASING.md) — that runbook is normative, this section is the
+quick path. One rule to remember: **versions change only via
+`scripts/prepare_release.sh` on green `main`** (never hand-edit POM or
+`pyproject.toml` versions).
+
+```bash
+git checkout main && git pull          # release ALWAYS from green main
+scripts/prepare_release.sh 1.0.1      # release commit + post-release SNAPSHOT bump
+git tag v1.0.1
+git push origin main v1.0.1           # tag push triggers publish
+git tag -d v1.0.1 && git push origin :refs/tags/v1.0.1
+```
+
+What the tag push triggers (`.github/workflows/release.yml`):
+
+1. **guard** — strict numeric regex on the tag (a loose `v*.*.*` glob alone
+   would admit `v1.0.0-rc1`); non-matching tags skip silently.
+2. **publish-maven** — verifies POM version == tag version, imports the GPG
+   key, then `mvn -Prelease clean deploy`: sources + javadoc/scaladoc jars,
+   GPG signing, Central Portal upload via `central-publishing-maven-plugin`
+   (server id `central`; only the public surface — internal shims/layers are
+   `excludeArtifacts`).
+3. **publish-pypi** — bundles the SAME run's jars into the wheel,
+   `twine check`, publishes via OIDC trusted publishing (environment
+   `release`; no API token).
+4. **smoke-test** — installs the wheel from PyPI and asserts the bundled
+   jars exist; resolves the plugin + a bundle from Central by coordinate
+   (with polling — the first release sits in the Portal for manual review
+   because `autoPublish=false`).
+
+First release only: approve the Maven deployment in the Central Portal UI.
+Central is immutable — a bad release is fixed by a NEW version, never by
+re-publishing or moving a tag.
 
 ---
 
@@ -477,7 +676,13 @@ The ScalaTest bridge is specified as WP-18 (`mutator-scalatest`) but deferred:
 its planned discovery runner (`org.scalatest.junit.JUnitRunner`) does not exist
 in the managed ScalaTest 3.2.18 — status, evidence, and the resume plan live in
 [`SCALA_PIPELINES.md`](SCALA_PIPELINES.md). WP-17 tightens discovery to a
-single plan shape and adds the applied-mutation honesty guard. WP-25 (in-process
-per-mutant watchdog), WP-26 (zero-touch fork path, pitest parity), and WP-27
-(`Decimal → Double` type-downgrade mutator) are designed-but-unimplemented
-future work.
+single plan shape and adds the applied-mutation honesty guard. WP-26
+(zero-touch fork path, pitest parity), WP-27
+(`Decimal → Double` type-downgrade mutator), and WP-28 (mutation-loop
+performance: measure first, then parallelize or shard) are
+designed-but-unimplemented future work. WP-25 (in-process per-mutant
+watchdog) shipped: the JUnit 5 standalone loop enforces
+`ceil(baseline × timeoutMultiplier)` per mutant with a cancel + interrupt
+escalation ladder, classifies deadline hits as `TIMED_OUT`, and abandons to
+a flushed partial report when a re-run thread ignores both channels
+(reports record `config.timeoutEnforced: true`).

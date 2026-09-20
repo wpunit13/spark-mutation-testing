@@ -4,8 +4,12 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.wpunit13.mutator.catalog.MutationCatalogIo;
 import io.github.wpunit13.mutator.model.MutantMetadata;
+import io.github.wpunit13.mutator.model.MutantResult;
+import io.github.wpunit13.mutator.model.MutantStatus;
 import io.github.wpunit13.mutator.model.OperatorTypeDto;
 import io.github.wpunit13.mutator.report.AppliedMarkerStore;
+import io.github.wpunit13.mutator.report.OutcomeFileStore;
+import org.apache.maven.plugin.MojoExecutionException;
 import org.apache.maven.plugin.MojoFailureException;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -117,6 +121,203 @@ class MutationLoopCoordinatorTest {
     }
 
     @Test
+    void forkTestResultsFlowIntoTheReport() throws Exception {
+        Map<String, SurefireExecutor.SurefireResult> outcomes = new LinkedHashMap<>();
+        outcomes.put(MUTANT_1, SurefireExecutor.SurefireResult.success(60L).withTestResults(
+                List.of("pipeline.OrdersPipelineTest.test1", "pipeline.OrdersPipelineTest.test2"),
+                List.of()));
+        outcomes.put(MUTANT_2, SurefireExecutor.SurefireResult.failure(60L, "Expected [42] but found [0]", 1).withTestResults(
+                List.of("pipeline.OrdersPipelineTest.test1"),
+                List.of("pipeline.OrdersPipelineTest.test1")));
+
+        StubExecutor mockExecutor = new StubExecutor(
+                tempDir,
+                List.of(meta(MUTANT_1), meta(MUTANT_2)),
+                outcomes);
+
+        MutationLoopCoordinator coordinator = new MutationLoopCoordinator(
+                mockExecutor, 2.0, tempDir.toFile(), 0.0);
+        coordinator.execute();
+
+        JsonNode report = mapper.readTree(tempDir.resolve("mutation-report.json").toFile());
+        JsonNode survived = mutantById(report, MUTANT_1);
+        JsonNode killed = mutantById(report, MUTANT_2);
+
+        // The survivor's mapped tests = the tests that ran against it — the
+        // fork path's conservative attribution (no TIA yet, whole suite runs).
+        assertEquals(2, survived.get("mappedTestIds").size());
+        assertEquals("pipeline.OrdersPipelineTest.test2", survived.get("mappedTestIds").get(1).asText());
+
+        // The killed mutant names its killer in the outcome detail.
+        assertEquals("KILLED", killed.get("result").get("status").asText());
+        String detail = killed.get("result").get("failureDetailOrNull").asText();
+        assertTrue(detail.contains("Failing tests:"), () -> detail);
+        assertTrue(detail.contains("pipeline.OrdersPipelineTest.test1"), () -> detail);
+    }
+
+    @Test
+    void perMutantTimingLineCarriesVerdictForkStartupExecAndDeadline() throws Exception {
+        // execMs 60, suite test time 45 -> forkStartupMs 15 (the §1.3 S_fork split)
+        Map<String, SurefireExecutor.SurefireResult> outcomes = new LinkedHashMap<>();
+        outcomes.put(MUTANT_1, SurefireExecutor.SurefireResult.success(60L).withTestResults(
+                List.of("pipeline.OrdersPipelineTest.test1"), List.of(), 45L));
+
+        StubExecutor mockExecutor = new StubExecutor(tempDir, List.of(meta(MUTANT_1, "t1")), outcomes, 100L);
+        List<String> lines = new ArrayList<>();
+
+        MutationLoopCoordinator coordinator = new MutationLoopCoordinator(
+                mockExecutor, 2.0, tempDir.toFile(), 0.0, List.of(), List.of(), false, lines::add, 1, 0);
+        coordinator.execute();
+
+        assertEquals(2, lines.size(), "one baseline line + one per-mutant line");
+        assertEquals("baseline forkStartupMs=100 execMs=100", lines.get(0));
+        assertEquals("mutant " + MUTANT_1 + " verdict=SURVIVED forkStartupMs=15 execMs=60 deadlineMs=200",
+                lines.get(1));
+    }
+
+    @Test
+    void shardFilterSlicesTheCatalogByIndex() throws Exception {
+        Map<String, SurefireExecutor.SurefireResult> outcomes = new LinkedHashMap<>();
+        outcomes.put(MUTANT_1, SurefireExecutor.SurefireResult.success(10L));
+        outcomes.put(MUTANT_2, SurefireExecutor.SurefireResult.success(10L));
+        outcomes.put(MUTANT_3, SurefireExecutor.SurefireResult.success(10L));
+        List<MutantMetadata> catalog = List.of(meta(MUTANT_1), meta(MUTANT_2), meta(MUTANT_3));
+
+        MutationLoopCoordinator shard0 = new MutationLoopCoordinator(
+                new StubExecutor(tempDir, catalog, outcomes), 2.0, tempDir.toFile(), 0.0,
+                List.of(), List.of(), false, l -> {}, 2, 0);
+        MutationLoopCoordinator.MutationLoopResult r0 = shard0.execute();
+        assertEquals(2, r0.getTotalMutants(), "shard 0 of 3 mutants at N=2 runs indices 0 and 2");
+
+        MutationLoopCoordinator shard1 = new MutationLoopCoordinator(
+                new StubExecutor(tempDir, catalog, outcomes), 2.0, tempDir.toFile(), 0.0,
+                List.of(), List.of(), false, l -> {}, 2, 1);
+        MutationLoopCoordinator.MutationLoopResult r1 = shard1.execute();
+        assertEquals(1, r1.getTotalMutants(), "shard 1 runs index 1 only");
+
+        // Disjoint slices: outcomes on disk after both runs cover all 3 exactly once.
+        JsonNode report = mapper.readTree(tempDir.resolve("mutation-report.json").toFile());
+        assertEquals(1, report.get("mutants").size());
+        assertEquals(MUTANT_2, report.get("mutants").get(0).get("mutantId").asText());
+        assertEquals(2, report.get("config").get("shards").asInt());
+        assertEquals(1, report.get("config").get("shard").asInt());
+    }
+
+    @Test
+    void invalidShardConfigurationFailsFast() {
+        assertThrows(IllegalArgumentException.class, () -> new MutationLoopCoordinator(
+                new StubExecutor(tempDir, List.of(), Map.of()), 2.0, tempDir.toFile(), 0.0,
+                List.of(), List.of(), false, l -> {}, 0, 0));
+        assertThrows(IllegalArgumentException.class, () -> new MutationLoopCoordinator(
+                new StubExecutor(tempDir, List.of(), Map.of()), 2.0, tempDir.toFile(), 0.0,
+                List.of(), List.of(), false, l -> {}, 2, 2));
+    }
+
+    @Test
+    void mergeFromDiskProducesFullReportFromShardOutcomes() throws Exception {
+        List<MutantMetadata> catalog = List.of(meta(MUTANT_1, "t1"), meta(MUTANT_2, "t2"), meta(MUTANT_3, "t3"));
+        MutationCatalogIo.writeCatalogJson(tempDir, catalog);
+        OutcomeFileStore.writeOutcome(tempDir, new MutantResult(MUTANT_1, MutantStatus.KILLED, 10L, null, 1L));
+        OutcomeFileStore.writeOutcome(tempDir, new MutantResult(MUTANT_2, MutantStatus.SURVIVED, 10L, null, 2L));
+        OutcomeFileStore.writeOutcome(tempDir, new MutantResult(MUTANT_3, MutantStatus.NOT_APPLIED, 10L, null, 3L));
+
+        MutationLoopCoordinator.MutationLoopResult r = new MutationLoopCoordinator(
+                new StubExecutor(tempDir, catalog, Map.of()), 2.0, tempDir.toFile(), 0.0).mergeFromDisk();
+
+        assertEquals(3, r.getTotalMutants());
+        assertEquals(1, r.getKilled());
+        assertEquals(1, r.getSurvived());
+        assertEquals(1, r.getNotApplied());
+        assertEquals(0, r.getErrored());
+        assertEquals(50.0, r.getMutationScore());
+        JsonNode report = mapper.readTree(tempDir.resolve("mutation-report.json").toFile());
+        assertEquals(3, report.get("mutants").size());
+    }
+
+    @Test
+    void mergeFailsLoudlyWhenAShardLeftNoOutcome() throws Exception {
+        List<MutantMetadata> catalog = List.of(meta(MUTANT_1), meta(MUTANT_2));
+        MutationCatalogIo.writeCatalogJson(tempDir, catalog);
+        OutcomeFileStore.writeOutcome(tempDir, new MutantResult(MUTANT_1, MutantStatus.KILLED, 10L, null, 1L));
+
+        MutationLoopCoordinator coordinator = new MutationLoopCoordinator(
+                new StubExecutor(tempDir, catalog, Map.of()), 2.0, tempDir.toFile(), 0.0);
+        MojoExecutionException e = assertThrows(MojoExecutionException.class, coordinator::mergeFromDisk);
+        assertTrue(e.getMessage().contains("1 of 2"), e.getMessage());
+        assertTrue(e.getMessage().contains(MUTANT_2), e.getMessage());
+    }
+
+    @Test
+    void skipBaselineRunsLoopOnlyWithTheParentDeadline() throws Exception {
+        List<MutantMetadata> catalog = List.of(meta(MUTANT_1));
+        MutationCatalogIo.writeCatalogJson(tempDir, catalog);
+        Map<String, SurefireExecutor.SurefireResult> outcomes = new LinkedHashMap<>();
+        outcomes.put(MUTANT_1, SurefireExecutor.SurefireResult.success(10L));
+        StubExecutor mockExecutor = new StubExecutor(tempDir, catalog, outcomes);
+
+        MutationLoopCoordinator coordinator = new MutationLoopCoordinator(
+                mockExecutor, 2.0, tempDir.toFile(), 0.0, List.of(), List.of(), false,
+                l -> {}, 1, 0, true, 500L);
+        coordinator.execute();
+
+        assertEquals(1, mockExecutor.requests.size(), "no baseline request — the parent ran it");
+        assertEquals(500L, mockExecutor.requests.get(0).getTimeoutMillis(),
+                "children use the parent's deadline, not a recomputed one");
+    }
+
+    @Test
+    void skipBaselineWithoutDeadlineFailsFast() {
+        assertThrows(IllegalArgumentException.class, () -> new MutationLoopCoordinator(
+                new StubExecutor(tempDir, List.of(), Map.of()), 2.0, tempDir.toFile(), 0.0,
+                List.of(), List.of(), false, l -> {}, 1, 0, true, 0L));
+    }
+
+    @Test
+    void childCommandReconstructsParentInvocationAndPinsDirectivesLast() {
+        List<String> cmd = MutateMojo.childCommand(
+                "/opt/maven/bin/mvn",
+                List.of("test-compile", "spark-mutation-testing:mutate"),
+                List.of("hardened"),
+                Map.of("spark.version", "3.5.3", "spark.mutator.workers", "4"),
+                4, 2, 21638L);
+
+        assertEquals("/opt/maven/bin/mvn", cmd.get(0));
+        assertTrue(cmd.contains("test-compile"));
+        assertTrue(cmd.contains("-Phardened"));
+        assertTrue(cmd.contains("-Dspark.version=3.5.3"));
+        // shard directives come after the passthrough and pin workers to 1
+        // so a child can never re-fan-out
+        assertTrue(cmd.indexOf("-Dspark.mutator.workers=1") > cmd.indexOf("-Dspark.mutator.workers=4"));
+        assertTrue(cmd.contains("-Dspark.mutator.shards=4"));
+        assertTrue(cmd.contains("-Dspark.mutator.shard=2"));
+        assertTrue(cmd.contains("-Dspark.mutator.skipBaseline=true"));
+        assertEquals("-Dspark.mutator.deadlineMillis=21638", cmd.get(cmd.size() - 1));
+    }
+
+    private JsonNode mutantById(JsonNode report, String mutantId) {
+        for (JsonNode m : report.get("mutants")) {
+            if (mutantId.equals(m.get("mutantId").asText())) {
+                return m;
+            }
+        }
+        throw new AssertionError("mutant missing from report: " + mutantId);
+    }
+
+    void perTestAttributionDisablesFailFastOnMutantForks() throws Exception {
+        Map<String, SurefireExecutor.SurefireResult> outcomes = new LinkedHashMap<>();
+        outcomes.put(MUTANT_1, SurefireExecutor.SurefireResult.success(50L));
+        StubExecutor mockExecutor = new StubExecutor(tempDir, List.of(meta(MUTANT_1, "t1")), outcomes);
+
+        MutationLoopCoordinator coordinator = new MutationLoopCoordinator(
+                mockExecutor, 2.0, tempDir.toFile(), 0.0, List.of(), List.of(), true);
+        coordinator.execute();
+
+        // Baseline: no fail-fast (unchanged). Mutant fork: fail-fast OFF so the
+        // surefire XML records every failing test for the test-value report.
+        assertFalse(mockExecutor.requests.get(0).isFailFast());
+        assertFalse(mockExecutor.requests.get(1).isFailFast());
+    }
+
     void forkSuccessWithoutAppliedMarkerIsReclassifiedNotApplied() throws Exception {
         // Pre-WP-17 this fork outcome classified as SURVIVED — the fake
         // survivor that corrupted the mutation score. The missing applied

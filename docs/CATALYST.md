@@ -354,11 +354,15 @@ for the full iteration log.
 
 ### 7.2 What the fallback cannot do (stated plainly)
 
-- **First-wins ambiguity.** Two same-class nodes with identical shapes are
-  indistinguishable to both the primary key and the fallback. The first
-  pre-order candidate wins. The applied rewrite is still a valid instance of
-  the same operator shape; every fallback engagement is WARN-logged and every
-  application carries an auditable `astDiffSnippet`.
+- **Ambiguity is refused, not guessed.** Two same-class nodes with identical
+  shapes are indistinguishable to both the primary key and the fallback. When
+  the fallback's identity criteria match MORE THAN ONE node, the rewrite is
+  refused (WARN-logged) and the honesty guard classifies the run as
+  not-applied — first-match-wins would make the verdict depend on plan order,
+  which shifts with replan timing under CPU contention (measured: the same
+  mutant flipped SURVIVED/KILLED between sequential and concurrent fork runs
+  before this refusal existed). A single-candidate fallback still applies and
+  is WARN-logged with an auditable `astDiffSnippet`.
 - **Designed not-applied.** Nodes eliminated before execution (pruned stubs,
   cache-hidden subtrees) are honestly ERRORED by the guard. On multi-shape
   plans this is expected and bounded — but invisible to the score formula

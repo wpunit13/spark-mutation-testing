@@ -33,7 +33,7 @@ A runnable proof lives in `examples/spark-gradle-junit5/`.
 | Fork-per-mutant external loop | ❌ Maven-only (`spark-mutation-testing:mutate`) |
 | `spark-mutation-testing:mutate` plugin goal | ❌ Maven-only |
 | Dedicated governance-gate exit code 2 | ❌ Maven-only — under Gradle a failed gate surfaces as the generic JUnit/Gradle non-zero test failure (same limitation as the in-process path under Surefire; see [`developer-guide.md`](developer-guide.md) §4, WP-19) |
-| Per-mutant timeout enforcement (`timeoutMultiplier`) | ❌ Maven-only — the in-process loop has no watchdog; a hung mutant hangs the test JVM. The property is still accepted and echoed into the report's `config` block, but nothing enforces a deadline. Tracked as WP-25 (in-process per-mutant watchdog, planned) |
+| Per-mutant timeout enforcement (`timeoutMultiplier`) | ✅ Works (WP-25) — the in-process loop enforces a per-mutant deadline (`ceil(baseline elapsed × multiplier)`) with a cancel + interrupt watchdog; a hung mutant is classified `TIMED_OUT` and the loop continues. If the re-run thread ignores both channels, the loop abandons, flushes the partial report, and fails the run (never `System.exit` — WP-19). Reports record `config.timeoutEnforced: true` |
 | `exitProcessOnGateFailure` / `injectAddOpens` | N/A — Mojo parameters. Under Gradle, gate failures are ordinary test failures and the JVM opens are configured by hand (§3) |
 
 The fork-per-mutant loop is built on Surefire's fork JVM lifecycle
@@ -145,7 +145,7 @@ Full property surface, verified against the engine and extension code:
 | `spark.mutator.outputDirectory` | `target/spark-mutator-reports` (a Maven-ism) | report dir; §3 points it at Gradle's `build/` instead |
 | `spark.mutator.excludedMutators` | *(empty)* | CSV of operator types (`JOIN`, `FILTER`, `AGGREGATE`, `WINDOW`, `PROJECT`, `OTHER`); the engine skips them at discovery AND refuses to rewrite them mid-run |
 | `spark.mutator.targetModules` | *(empty)* | ⚠️ **do not set on the JVM paths today** — no JVM harness feeds a file-path hint, so setting it registers NOTHING (fail-safe, with a one-time warning). See [`developer-guide.md`](developer-guide.md) §3.1 |
-| `spark.mutator.timeoutMultiplier` | `2.0` | echoed into the report's `config` block only — **no deadline is enforced in-process** (§2; WP-25, planned) |
+| `spark.mutator.timeoutMultiplier` | `2.0` | per-mutant deadline = `ceil(baseline elapsed × multiplier)`, enforced by the in-process watchdog (WP-25); the report's `config` block records `timeoutEnforced: true` |
 | `spark.sql.extensions` | — | interception; the extension self-heals it if forgotten, but declare it explicitly so plain runs are honest (§4) |
 
 All three gates (ERRORED count, not-applied ratio, score floor) run in

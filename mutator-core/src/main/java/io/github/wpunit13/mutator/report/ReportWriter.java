@@ -33,9 +33,21 @@ public final class ReportWriter {
     private static final String PROP_TIMEOUT_MULTIPLIER = "spark.mutator.timeoutMultiplier";
     private static final String PROP_MIN_MUTATION_SCORE = "spark.mutator.minMutationScore";
 
+    /**
+     * WP-25: set to {@code true} by every orchestration surface that enforces
+     * a per-mutant deadline (Maven fork kill, PySpark watchdog, JUnit 5
+     * in-process watchdog) so the report's config echo distinguishes enforced
+     * deadlines from the pre-WP-25 echo-only era.
+     */
+    private static final String PROP_TIMEOUT_ENFORCED = "spark.mutator.timeoutEnforced";
+
     /** WP-24 governance-gate knobs (one key, both surfaces). */
     public static final String PROP_MAX_ERRORED_COUNT = "spark.mutator.maxErroredCount";
     public static final String PROP_MAX_NOT_APPLIED_RATIO = "spark.mutator.maxNotAppliedRatio";
+
+    /** Mechanism-(c) CI sharding knobs (one key, both surfaces). */
+    public static final String PROP_SHARDS = "spark.mutator.shards";
+    public static final String PROP_SHARD = "spark.mutator.shard";
 
     /** Default for {@code spark.mutator.maxNotAppliedRatio}: 20% of the run. */
     public static final double DEFAULT_MAX_NOT_APPLIED_RATIO = 0.20;
@@ -59,16 +71,36 @@ public final class ReportWriter {
         private final List<String> excludedMutators;
         private final double timeoutMultiplier;
         private final double minMutationScore;
+        private final boolean timeoutEnforced;
+        /** Mechanism-(c) CI sharding echo; 1/0 = unsharded. */
+        private final int shards;
+        private final int shard;
 
         public Config(
                 List<String> targetModules,
                 List<String> excludedMutators,
                 double timeoutMultiplier,
-                double minMutationScore) {
+                double minMutationScore,
+                boolean timeoutEnforced) {
+            this(targetModules, excludedMutators, timeoutMultiplier, minMutationScore,
+                    timeoutEnforced, 1, 0);
+        }
+
+        public Config(
+                List<String> targetModules,
+                List<String> excludedMutators,
+                double timeoutMultiplier,
+                double minMutationScore,
+                boolean timeoutEnforced,
+                int shards,
+                int shard) {
             this.targetModules = targetModules == null ? List.of() : List.copyOf(targetModules);
             this.excludedMutators = excludedMutators == null ? List.of() : List.copyOf(excludedMutators);
             this.timeoutMultiplier = timeoutMultiplier;
             this.minMutationScore = minMutationScore;
+            this.timeoutEnforced = timeoutEnforced;
+            this.shards = shards;
+            this.shard = shard;
         }
 
         /**
@@ -85,7 +117,10 @@ public final class ReportWriter {
                     splitCsv(System.getProperty(PROP_TARGET_MODULES)),
                     splitCsv(System.getProperty(PROP_EXCLUDED_MUTATORS)),
                     parseDouble(System.getProperty(PROP_TIMEOUT_MULTIPLIER), 2.0),
-                    parseDouble(System.getProperty(PROP_MIN_MUTATION_SCORE), 0.0));
+                    parseDouble(System.getProperty(PROP_MIN_MUTATION_SCORE), 0.0),
+                    Boolean.parseBoolean(System.getProperty(PROP_TIMEOUT_ENFORCED, "false")),
+                    parseInt(System.getProperty(PROP_SHARDS), 1),
+                    parseInt(System.getProperty(PROP_SHARD), 0));
         }
 
         private static List<String> splitCsv(String value) {
@@ -109,6 +144,17 @@ public final class ReportWriter {
             }
         }
 
+        private static int parseInt(String value, int fallback) {
+            if (value == null || value.isBlank()) {
+                return fallback;
+            }
+            try {
+                return Integer.parseInt(value.trim());
+            } catch (NumberFormatException e) {
+                return fallback;
+            }
+        }
+
         public List<String> getTargetModules() {
             return targetModules;
         }
@@ -123,6 +169,18 @@ public final class ReportWriter {
 
         public double getMinMutationScore() {
             return minMutationScore;
+        }
+
+        public boolean isTimeoutEnforced() {
+            return timeoutEnforced;
+        }
+
+        public int getShards() {
+            return shards;
+        }
+
+        public int getShard() {
+            return shard;
         }
     }
 
@@ -244,6 +302,7 @@ public final class ReportWriter {
             Path json = JsonReportWriter.write(outputDir, catalog, snapshot, config);
             SarifReportWriter.write(outputDir, catalog, snapshot);
             HtmlReportWriter.write(outputDir, catalog, snapshot);
+            TestValueReportWriter.write(outputDir, catalog, snapshot);
             return json.toAbsolutePath().toString();
         } catch (IOException e) {
             throw new IllegalStateException("Failed to write reports to " + outputDir, e);

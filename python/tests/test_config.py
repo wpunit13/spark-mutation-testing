@@ -41,6 +41,30 @@ output_dir = "target/mutator-out"
     assert config.output_dir == "target/mutator-out"
 
 
+def test_per_test_attribution_loads_and_defaults_false(tmp_path):
+    # Default: fail-fast (fastest); the test-value report then has biased
+    # (first-killer-only) attribution.
+    defaults = SparkMutatorConfig.from_toml(_write(tmp_path, "[project]\n"))
+    assert defaults.per_test_attribution is False
+
+    enabled = SparkMutatorConfig.from_toml(
+        _write(
+            tmp_path,
+            '[tool.spark-mutator]\nper_test_attribution = true\n',
+        )
+    )
+    assert enabled.per_test_attribution is True
+
+
+def test_per_test_attribution_rejects_non_boolean(tmp_path):
+    path = _write(
+        tmp_path,
+        '[tool.spark-mutator]\nper_test_attribution = "yes"\n',
+    )
+    with pytest.raises(ValueError, match="per_test_attribution"):
+        SparkMutatorConfig.from_toml(path)
+
+
 def test_missing_table_returns_all_defaults(tmp_path):
     path = _write(tmp_path, '[project]\nname = "example"\n')
     config = SparkMutatorConfig.from_toml(path)

@@ -68,7 +68,16 @@ target_modules   = ["my_pipeline.transforms"]   # scope discovery
 excluded_mutators = ["CrossJoinMutator"]        # skip a rule
 timeout_multiplier = 2.0                        # per-mutant deadline
 min_mutation_score = 80.0                       # CI gate
+per_test_attribution = true                     # run every mapped test per mutant
+                                                # (no fail-fast) — enables meaningful
+                                                # test-value verdicts
 ```
+
+Alongside the mutation report you get `test-value-report.{json,html}`: per-test
+kill attribution that flags **redundant test cases** — tests whose kills are
+fully covered by other tests in the run (`REDUNDANT_CANDIDATE`) vs tests that
+uniquely catch at least one mutant (`LOAD_BEARING`). Verdicts are relative to
+the current suite; see `docs/CONTRACTS.md` §5.4.
 
 ---
 
@@ -80,13 +89,13 @@ Two test-scoped dependencies and one annotation. Existing tests stay untouched:
 <dependency>
   <groupId>io.github.wpunit13</groupId>
   <artifactId>mutator-junit5</artifactId>
-  <version>1.0.0-SNAPSHOT</version>
+  <version>1.0.0</version> <!-- released consumers; 1.0.0-SNAPSHOT for dev via mavenLocal() -->
   <scope>test</scope>
 </dependency>
 <dependency>
   <groupId>io.github.wpunit13</groupId>
   <artifactId>interceptor-bundle-spark-3.5_2.13</artifactId> <!-- match your Spark/Scala line -->
-  <version>1.0.0-SNAPSHOT</version>
+  <version>1.0.0</version>
   <scope>test</scope>
 </dependency>
 ```
@@ -166,7 +175,8 @@ flowchart LR
 3. **Mutation loop** — activate one mutant, run its mapped tests fail-fast.
 4. **Classify** — `KILLED` / `SURVIVED` / `TIMED_OUT` / `ERRORED`, then reset all
    Spark state so results can't leak between mutants.
-5. **Report** — terminal summary, `mutation-report.json`, SARIF, HTML.
+5. **Report** — terminal summary, `mutation-report.json`, SARIF, HTML, and the
+   per-test `test-value-report.{json,html}` (redundant-test flag).
 
 ---
 
@@ -231,7 +241,7 @@ support (WP-18, deferred), and further governance gates.
 ```bash
 mvn clean package -DskipTests
 ```
-This compiles `spark-mutation-testing-core`, the Catalyst interceptor shims, and creates the shaded uber-jar at `catalyst-interceptor/interceptor-bundle/target/interceptor-spark-3.5_2.13.jar`.
+This compiles `spark-mutation-testing-core`, the Catalyst interceptor shims, and creates the shaded uber-jars at `catalyst-interceptor/interceptor-bundle*/target/interceptor-spark-<combo>.jar` (one per supported Spark/Scala combination).
 
 ### 2. Bundle the jar into Python package data
 

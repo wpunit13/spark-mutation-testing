@@ -3,11 +3,10 @@
 The runbook for cutting a release. If you remember only one rule, make it
 **Rule 1** below.
 
-> **Status:** the release tooling (`scripts/prepare_release.sh`,
-> `.github/workflows/release.yml`) is introduced by the release-engineering
-> work packet; until then nothing publishes and this document is the normative
-> process that tooling implements. The human one-time prerequisites (§7) are
-> needed before the first release regardless.
+> **Status (WP-22):** the release tooling now exists — `scripts/prepare_release.sh`
+> and `.github/workflows/release.yml` implement this document. This document
+> remains the normative process the tooling implements. The human one-time
+> prerequisites (§7) are needed before the first release regardless.
 
 ---
 
@@ -70,12 +69,19 @@ repeat
 ```bash
 git checkout main && git pull          # release ALWAYS from green main
 scripts/prepare_release.sh 1.0.1      # versions:set + pyproject sync + release commit
+                                      #   + post-release SNAPSHOT bump (both committed)
 git tag v1.0.1
 git push origin main v1.0.1           # tag push triggers publish
 ```
 
+The script creates TWO commits: the release commit (`release: v1.0.1`, exact
+version) and the post-release bump (`1.0.2-SNAPSHOT`). It prints the exact
+tag+push commands; tagging and pushing stay human actions.
+
 Then watch the `release` workflow: **guard → publish-maven → publish-pypi →
-smoke-test**, all green before announcing anything.
+smoke-test**, all green before announcing anything. The workflow derives the
+version FROM the tag and a guard step fails the build on a tag/POM mismatch
+instead of publishing wrong coordinates.
 
 Choosing the number (`<version>`):
 
@@ -104,7 +110,10 @@ must never exist.
    bundle from Central by coordinate.
 
 First release only: the Maven job lands in the Central Portal for **manual
-review** (`autoPublish=false`) — approve it in the Portal UI.
+review** (`autoPublish=false`, set in the root POM's `release` profile) —
+approve it in the Portal UI. The `smoke-test` job polls Central for up to 30
+minutes so the review delay does not fail the run. Flip `autoPublish` to
+`true` in a LATER change, never in the packet/change that first publishes.
 
 ---
 
