@@ -89,13 +89,13 @@ Two test-scoped dependencies and one annotation. Existing tests stay untouched:
 <dependency>
   <groupId>io.github.wpunit13</groupId>
   <artifactId>mutator-junit5</artifactId>
-  <version>1.0.0-SNAPSHOT</version>
+  <version>1.0.0</version> <!-- released consumers; 1.0.0-SNAPSHOT for dev via mavenLocal() -->
   <scope>test</scope>
 </dependency>
 <dependency>
   <groupId>io.github.wpunit13</groupId>
   <artifactId>interceptor-bundle-spark-3.5_2.13</artifactId> <!-- match your Spark/Scala line -->
-  <version>1.0.0-SNAPSHOT</version>
+  <version>1.0.0</version>
   <scope>test</scope>
 </dependency>
 ```
@@ -241,7 +241,7 @@ support (WP-18, deferred), and further governance gates.
 ```bash
 mvn clean package -DskipTests
 ```
-This compiles `spark-mutation-testing-core`, the Catalyst interceptor shims, and creates the shaded uber-jar at `catalyst-interceptor/interceptor-bundle/target/interceptor-spark-3.5_2.13.jar`.
+This compiles `spark-mutation-testing-core`, the Catalyst interceptor shims, and creates the shaded uber-jars at `catalyst-interceptor/interceptor-bundle*/target/interceptor-spark-<combo>.jar` (one per supported Spark/Scala combination).
 
 ### 2. Bundle the jar into Python package data
 

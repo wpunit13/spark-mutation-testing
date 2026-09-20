@@ -625,6 +625,45 @@ writes `catalog.json` and applied markers.
 
 ---
 
+## 8. Cutting a release
+
+The full procedure, guard rails, and failure modes live in
+[`RELEASING.md`](RELEASING.md) — that runbook is normative, this section is the
+quick path. One rule to remember: **versions change only via
+`scripts/prepare_release.sh` on green `main`** (never hand-edit POM or
+`pyproject.toml` versions).
+
+```bash
+git checkout main && git pull          # release ALWAYS from green main
+scripts/prepare_release.sh 1.0.1      # release commit + post-release SNAPSHOT bump
+git tag v1.0.1
+git push origin main v1.0.1           # tag push triggers publish
+git tag -d v1.0.1 && git push origin :refs/tags/v1.0.1
+```
+
+What the tag push triggers (`.github/workflows/release.yml`):
+
+1. **guard** — strict numeric regex on the tag (a loose `v*.*.*` glob alone
+   would admit `v1.0.0-rc1`); non-matching tags skip silently.
+2. **publish-maven** — verifies POM version == tag version, imports the GPG
+   key, then `mvn -Prelease clean deploy`: sources + javadoc/scaladoc jars,
+   GPG signing, Central Portal upload via `central-publishing-maven-plugin`
+   (server id `central`; only the public surface — internal shims/layers are
+   `excludeArtifacts`).
+3. **publish-pypi** — bundles the SAME run's jars into the wheel,
+   `twine check`, publishes via OIDC trusted publishing (environment
+   `release`; no API token).
+4. **smoke-test** — installs the wheel from PyPI and asserts the bundled
+   jars exist; resolves the plugin + a bundle from Central by coordinate
+   (with polling — the first release sits in the Portal for manual review
+   because `autoPublish=false`).
+
+First release only: approve the Maven deployment in the Central Portal UI.
+Central is immutable — a bad release is fixed by a NEW version, never by
+re-publishing or moving a tag.
+
+---
+
 ## Current status
 ---
 

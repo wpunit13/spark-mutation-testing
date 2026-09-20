@@ -18,7 +18,8 @@ difference is the mutation score.
 
 Copy three blocks into your own POM (versions pinned `1.0.0-SNAPSHOT` until the
 first Maven Central release; build this repo with `mvn clean install` first so
-they resolve from your local repository).
+they resolve from your local repository. Released consumers use `1.0.0` from
+Maven Central — examples keep the SNAPSHOT for the dev workflow).
 
 ### a) Test-scoped dependencies
 

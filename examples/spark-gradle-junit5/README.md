@@ -14,7 +14,8 @@ Maven aggregator.
 - A locally installed Gradle 8+ (no wrapper is committed; run `gradle test`
   with your local Gradle)
 - Maven 3.8+ — the engine artifacts are `1.0.0-SNAPSHOT` coordinates resolved
-  from `mavenLocal()`, so build them first:
+  from `mavenLocal()`, so build them first (released consumers use `1.0.0`
+  from Maven Central; examples stay on SNAPSHOT for the dev workflow):
 
 ```bash
 mvn -B clean install
