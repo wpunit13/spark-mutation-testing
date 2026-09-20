@@ -101,6 +101,16 @@ public class MutateMojo extends AbstractMojo {
     private double maxNotAppliedRatio = 0.20;
 
     /**
+     * Runs every mapped test per killed mutant (no fail-fast) so the fork's
+     * surefire XML records ALL failing tests, not just the first. Feeds the
+     * test-value report's sole-killer verdicts; costs runtime on killed
+     * mutants (the suite runs to completion instead of stopping early).
+     * Settable via {@code -Dspark.mutator.perTestAttribution=true}.
+     */
+    @Parameter(property = "spark.mutator.perTestAttribution", defaultValue = "false")
+    private boolean perTestAttribution = false;
+
+    /**
      * Module-path prefixes limiting which candidates Discovery registers (WP-19).
      * Settable via {@code -Dspark.mutator.targetModules=a,b} or {@code <configuration>}
      * (comma-separated on the command line; one element per {@code <targetModules>}).
@@ -262,7 +272,8 @@ public class MutateMojo extends AbstractMojo {
                     reportsDir,
                     minMutationScore,
                     targetModules,
-                    excludedMutators
+                    excludedMutators,
+                    perTestAttribution
             );
         }
 

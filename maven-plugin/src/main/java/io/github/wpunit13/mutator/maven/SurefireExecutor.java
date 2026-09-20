@@ -11,7 +11,15 @@ import org.apache.maven.plugin.descriptor.Parameter;
 import org.apache.maven.project.MavenProject;
 import org.codehaus.plexus.util.xml.Xpp3Dom;
 import org.eclipse.aether.repository.RemoteRepository;
+import org.w3c.dom.Element;
+import org.w3c.dom.NodeList;
 
+import javax.xml.parsers.DocumentBuilderFactory;
+import java.io.File;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -22,6 +30,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.stream.Stream;
 
 /**
  * Wraps Maven's {@link BuildPluginManager} to programmatically invoke
@@ -85,11 +94,15 @@ public class SurefireExecutor {
             mavenSession.setCurrentProject(project);
         }
 
+        Path reportsDir = surefireReportsDirectory();
+        cleanSurefireXmlReports(reportsDir);
+
+        SurefireResult result;
         try {
             if (request.getTimeoutMillis() <= 0L) {
-                return executeSynchronously(mojoExecution, start);
+                result = executeSynchronously(mojoExecution, start);
             } else {
-                return executeWithTimeout(mojoExecution, request.getTimeoutMillis(), start);
+                result = executeWithTimeout(mojoExecution, request.getTimeoutMillis(), start);
             }
         } finally {
             if (previousProject != null && previousProject != project) {
@@ -97,6 +110,110 @@ public class SurefireExecutor {
             }
             restoreSystemProperties(previousProps);
         }
+        return attachTestResults(result, reportsDir);
+    }
+
+    /** The fork's XML report directory: surefire's default
+     * ${project.build.directory}/surefire-reports (mirrors the descriptor
+     * default this class injects in buildConfiguration). */
+    private Path surefireReportsDirectory() {
+        String buildDir = project.getBuild() != null && project.getBuild().getDirectory() != null
+                ? project.getBuild().getDirectory()
+                : "target";
+        return Path.of(buildDir, "surefire-reports");
+    }
+
+    /** Deletes stale TEST-*.xml from a previous fork so the post-run parse
+      * only sees THIS fork's tests (surefire may run a subset per mutant). */
+    private static void cleanSurefireXmlReports(Path reportsDir) {
+        if (reportsDir == null || !Files.isDirectory(reportsDir)) {
+            return;
+        }
+        try (Stream<Path> files = Files.list(reportsDir)) {
+            files.filter(p -> p.getFileName().toString().startsWith("TEST-")
+                            && p.getFileName().toString().endsWith(".xml"))
+                    .forEach(p -> {
+                        try {
+                            Files.deleteIfExists(p);
+                        } catch (IOException ignored) {
+                            // stale report left behind: the parse below may then
+                            // see a previous fork's tests; harmless, best-effort
+                        }
+                    });
+        } catch (IOException ignored) {
+            // best-effort cleanup
+        }
+    }
+
+    /** Best-effort enrichment: parses the fork's XML reports and attaches the
+      * executed + failing test ids. A parse failure returns the result
+      * unchanged — attribution is a report-quality feature, never worth
+      * failing the loop over. */
+    private static SurefireResult attachTestResults(SurefireResult result, Path reportsDir) {
+        if (reportsDir == null) {
+            return result;
+        }
+        try {
+            SurefireTestResults parsed = parseSurefireReports(reportsDir);
+            return result.withTestResults(parsed.executedTestIds(), parsed.failedTestIds());
+        } catch (Exception e) {
+            return result;
+        }
+    }
+
+    /** Parsed view of one fork's surefire XML reports. */
+    record SurefireTestResults(List<String> executedTestIds, List<String> failedTestIds) {
+    }
+
+    /** Parses every TEST-*.xml in {@code reportsDir}. Executed = every
+      * testcase element; failed = testcases with a failure/error child.
+      * Ids are {@code classname.methodName}, sorted for determinism. */
+    static SurefireTestResults parseSurefireReports(Path reportsDir) throws IOException {
+        List<String> executed = new ArrayList<>();
+        List<String> failed = new ArrayList<>();
+        if (reportsDir == null || !Files.isDirectory(reportsDir)) {
+            return new SurefireTestResults(List.of(), List.of());
+        }
+        DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+        try {
+            // The reports are locally written files; refuse DTDs anyway (XXE hardening).
+            factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+        } catch (Exception ignored) {
+            // feature unsupported on this parser: proceed, input is trusted
+        }
+        try (Stream<Path> files = Files.list(reportsDir)) {
+            List<Path> xmls = files
+                    .filter(p -> p.getFileName().toString().startsWith("TEST-")
+                            && p.getFileName().toString().endsWith(".xml"))
+                    .sorted()
+                    .toList();
+            for (Path xml : xmls) {
+                try {
+                    Element suite = factory.newDocumentBuilder().parse(xml.toFile()).getDocumentElement();
+                    NodeList testcases = suite.getElementsByTagName("testcase");
+                    for (int i = 0; i < testcases.getLength(); i++) {
+                        Element tc = (Element) testcases.item(i);
+                        String classname = tc.getAttribute("classname");
+                        String name = tc.getAttribute("name");
+                        String id = (classname.isEmpty() ? "" : classname + ".") + name;
+                        if (id.isBlank()) {
+                            continue;
+                        }
+                        executed.add(id);
+                        if (tc.getElementsByTagName("failure").getLength() > 0
+                                || tc.getElementsByTagName("error").getLength() > 0) {
+                            failed.add(id);
+                        }
+                    }
+                } catch (Exception e) {
+                    // malformed/partial XML (e.g. a fork killed mid-write):
+                    // skip the file, keep what earlier files contributed
+                }
+            }
+        }
+        executed.sort(String::compareTo);
+        failed.sort(String::compareTo);
+        return new SurefireTestResults(List.copyOf(executed), List.copyOf(failed));
     }
 
     private Plugin resolveSurefirePlugin() {
@@ -375,12 +492,21 @@ public class SurefireExecutor {
         private final long elapsedMillis;
         private final boolean timedOut;
         private final String failureDetail;
+        private final List<String> executedTestIds;
+        private final List<String> failedTestIds;
 
         public SurefireResult(int exitCode, long elapsedMillis, boolean timedOut, String failureDetail) {
+            this(exitCode, elapsedMillis, timedOut, failureDetail, List.of(), List.of());
+        }
+
+        private SurefireResult(int exitCode, long elapsedMillis, boolean timedOut, String failureDetail,
+                               List<String> executedTestIds, List<String> failedTestIds) {
             this.exitCode = exitCode;
             this.elapsedMillis = elapsedMillis;
             this.timedOut = timedOut;
             this.failureDetail = failureDetail;
+            this.executedTestIds = executedTestIds == null ? List.of() : List.copyOf(executedTestIds);
+            this.failedTestIds = failedTestIds == null ? List.of() : List.copyOf(failedTestIds);
         }
 
         public static SurefireResult success(long elapsedMillis) {
@@ -393,6 +519,12 @@ public class SurefireExecutor {
 
         public static SurefireResult timeout(long elapsedMillis, String failureDetail) {
             return new SurefireResult(-1, elapsedMillis, true, failureDetail);
+        }
+
+        /** Copy with the fork's parsed test attribution. */
+        public SurefireResult withTestResults(List<String> executedTestIds, List<String> failedTestIds) {
+            return new SurefireResult(exitCode, elapsedMillis, timedOut, failureDetail,
+                    executedTestIds, failedTestIds);
         }
 
         public boolean isSuccess() {
@@ -417,6 +549,16 @@ public class SurefireExecutor {
 
         public String getFailureDetail() {
             return failureDetail;
+        }
+
+        /** Every test that ran against this mutant (fork path: the whole suite). */
+        public List<String> getExecutedTestIds() {
+            return executedTestIds;
+        }
+
+        /** The tests whose failure killed the mutant. */
+        public List<String> getFailedTestIds() {
+            return failedTestIds;
         }
     }
 

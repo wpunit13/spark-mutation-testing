@@ -104,13 +104,19 @@ public final class HtmlReportWriter {
             MutantStatus status = result == null ? MutantStatus.ERRORED : result.getStatus();
             String rowClass = status == MutantStatus.SURVIVED ? " class=\"survived\"" : "";
             String location = meta.getFilePath() + ":" + meta.getLineNumber();
+            if (meta.getFilePath() == null || meta.getFilePath().isBlank()
+                    || "unknown".equals(meta.getFilePath())) {
+                // No harness fed a source hint: render the gap honestly instead
+                // of a misleading "unknown:-1".
+                location = "\u2014";
+            }
             html.append("<tr").append(rowClass).append(">")
                     .append("<td><code>").append(escape(meta.getMutantId())).append("</code></td>")
                     .append("<td>").append(escape(meta.getOperatorType().name())).append(TABLE_CELL_CLOSE)
                     .append("<td>").append(escape(meta.getDescription())).append(TABLE_CELL_CLOSE)
                     .append("<td class=\"status\">").append(escape(status.name())).append(TABLE_CELL_CLOSE)
                     .append("<td><code>").append(escape(location)).append("</code></td>")
-                    .append("<td>").append(meta.getMappedTestIds().size()).append(TABLE_CELL_CLOSE)
+                    .append(mappedTestsCell(meta.getMappedTestIds()))
                     .append(diffCell(meta.getAstDiffSnippet()))
                     .append("</tr>\n");
         }
@@ -120,6 +126,26 @@ public final class HtmlReportWriter {
         Files.createDirectories(outputDir);
         Files.writeString(target, html.toString(), StandardCharsets.UTF_8);
         return target;
+    }
+
+    /**
+     * Expandable mapped-tests cell: the summary shows the count, the expanded
+     * body lists every mapped test id (the pytest path's test-impact mapping).
+     * An empty list renders the count alone — the field is optional (the Maven
+     * fork path has no test impact analysis yet).
+     */
+    private static String mappedTestsCell(List<String> mappedTestIds) {
+        if (mappedTestIds == null || mappedTestIds.isEmpty()) {
+            return "<td>0" + TABLE_CELL_CLOSE;
+        }
+        StringBuilder cell = new StringBuilder(
+                "<td><details class=\"diff-cell\"><summary>")
+                        .append(mappedTestIds.size()).append("</summary><ul>");
+        for (String testId : mappedTestIds) {
+            cell.append("<li><code>").append(escape(testId)).append("</code></li>");
+        }
+        cell.append("</ul></details>").append(TABLE_CELL_CLOSE);
+        return cell.toString();
     }
 
     /**

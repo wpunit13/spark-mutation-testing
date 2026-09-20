@@ -4,7 +4,7 @@ import io.github.wpunit13.mutator.api.{NodeCoordinateFactory, OperatorType, Shim
 import io.github.wpunit13.mutator.hash.DeterministicHasher
 import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.catalyst.expressions.{
-  Alias, And, Ascending, Coalesce, Descending, Literal, Not, SortOrder,
+  Alias, And, Ascending, Cast, Coalesce, Descending, Literal, Not, SortOrder,
   SpecifiedWindowFrame, UnaryMinus, UnboundedPreceding, WindowExpression
 }
 import org.apache.spark.sql.catalyst.expressions.aggregate.{Count, Max, Min, Sum}
@@ -12,7 +12,7 @@ import org.apache.spark.sql.catalyst.plans.logical.{Aggregate, Filter, Join, Loc
 import org.apache.spark.sql.catalyst.plans.{Cross, LeftOuter}
 import org.apache.spark.sql.expressions.Window
 import org.apache.spark.sql.functions.{coalesce, col, count, lit, max, min, row_number, sum}
-import org.apache.spark.sql.types.{BooleanType, LongType, StringType}
+import org.apache.spark.sql.types.{BooleanType, DoubleType, LongType, StringType}
 import org.scalatest.BeforeAndAfterAll
 import org.scalatest.funsuite.AnyFunSuite
 
@@ -98,6 +98,20 @@ class ShimImplSpec extends AnyFunSuite with BeforeAndAfterAll {
     Seq(("Alice", 100))
       .toDF("name", "val")
       .select(col("name"), col("val"))
+  }
+
+  private def decimalProjected(): DataFrame = {
+    import spark.implicits._
+    Seq(BigDecimal("12345678901234.5678901234"))
+      .toDF("balance")
+      .select(col("balance"))
+  }
+
+  private def decimalAliasProjected(): DataFrame = {
+    import spark.implicits._
+    Seq(BigDecimal("12345678901234.5678901234"))
+      .toDF("balance")
+      .select(col("balance").as("reported_balance"))
   }
 
   private def windowA(): DataFrame = {
@@ -201,6 +215,28 @@ class ShimImplSpec extends AnyFunSuite with BeforeAndAfterAll {
     assert(sig.startsWith("INNER;"))
     val expectedCoord = NodeCoordinateFactory(2, OperatorType.Join, 0, sig)
     assert(candidates.forall(_.coordinate == expectedCoord))
+  }
+
+  test("classify renders the node's ACTUAL join type in descriptions (LEFT/CROSS/ANTI sources)") {
+    import spark.implicits._
+    val left = Seq((1, 10)).toDF("l_id", "amount")
+    val right = Seq((1, "OK")).toDF("r_id", "status")
+
+    val leftJoin = findJoin(left.join(right, col("l_id") === col("r_id"), "left"))
+    val (_, leftCands) = shim.classify(leftJoin, 1, 0).getOrElse(fail("expected Join candidates"))
+    // Index 0 is the no-op LEFT -> LEFT and must be omitted.
+    assert(leftCands.map(_.mutationIndex) == Seq(1, 2))
+    assert(leftCands.map(_.description) == Seq("LEFT -> CROSS", "LEFT -> ANTI"))
+
+    val crossJoin = findJoin(left.crossJoin(right))
+    val (_, crossCands) = shim.classify(crossJoin, 1, 0).getOrElse(fail("expected Join candidates"))
+    assert(crossCands.map(_.mutationIndex) == Seq(0, 2))
+    assert(crossCands.map(_.description) == Seq("CROSS -> LEFT", "CROSS -> ANTI"))
+
+    val antiJoin = findJoin(left.join(right, col("l_id") === col("r_id"), "left_anti"))
+    val (_, antiCands) = shim.classify(antiJoin, 1, 0).getOrElse(fail("expected Join candidates"))
+    assert(antiCands.map(_.mutationIndex) == Seq(0, 1))
+    assert(antiCands.map(_.description) == Seq("ANTI -> LEFT", "ANTI -> CROSS"))
   }
 
   test("mutateJoin with mutationIndex 1 produces a conditionless Cross join") {
@@ -576,6 +612,63 @@ class ShimImplSpec extends AnyFunSuite with BeforeAndAfterAll {
     assert(candidates.map(_.description) == Seq("INJECT_NULL"))
   }
 
+  test("classify on Project with a Decimal expression adds candidate 2 (DECIMAL_TO_DOUBLE)") {
+    val projNode = findProject(decimalProjected())
+    val (_, candidates) = shim.classify(projNode, 1, 0).getOrElse(fail("expected Some for a Project node"))
+    assert(candidates.map(_.mutationIndex) == Seq(1, 2))
+    assert(candidates.map(_.description) == Seq("INJECT_NULL", "DECIMAL_TO_DOUBLE"))
+    assert(candidates.forall(_.operatorType == OperatorType.Project))
+  }
+
+  test("classify on an alias-wrapped Decimal projection also yields DECIMAL_TO_DOUBLE") {
+    val projNode = findProject(decimalAliasProjected())
+    val (_, candidates) = shim.classify(projNode, 1, 0).getOrElse(fail("expected Some for a Project node"))
+    assert(candidates.map(_.mutationIndex) == Seq(1, 2))
+    assert(candidates.map(_.description) == Seq("INJECT_NULL", "DECIMAL_TO_DOUBLE"))
+  }
+
+  test("mutateProject with mutationIndex 2 casts the first Decimal projection to Double preserving identity") {
+    val projNode = findProject(decimalProjected())
+    val originalAttr = projNode.projectList.head
+
+    val mutated = shim.mutateProject(projNode, 2).asInstanceOf[Project]
+    val target = mutated.projectList.head
+    // The whole point of the mutation: the output column's type is downgraded.
+    assert(target.dataType == DoubleType)
+    // Column identity stable: name and exprId survive the rewrite.
+    assert(target.name == "balance")
+    assert(target.exprId == originalAttr.exprId)
+    val cast = target match {
+      case a: Alias => a.child
+      case other    => other
+    }
+    assert(cast.isInstanceOf[Cast])
+    assert(cast.asInstanceOf[Cast].child == originalAttr)
+  }
+
+  test("mutateProject with mutationIndex 2 casts an alias-wrapped Decimal child in place") {
+    val projNode = findProject(decimalAliasProjected())
+    val originalAlias = projNode.projectList.collectFirst {
+      case a: Alias => a
+    }.getOrElse(fail("expected an Alias in projectList"))
+
+    val mutated = shim.mutateProject(projNode, 2).asInstanceOf[Project]
+    val target = mutated.projectList.collectFirst {
+      case a: Alias if a.name == "reported_balance" => a
+    }.getOrElse(fail("expected reported_balance alias in mutated projectList"))
+    assert(target.dataType == DoubleType)
+    assert(target.exprId == originalAlias.exprId)
+    val cast = target.child.asInstanceOf[Cast]
+    assert(cast.child == originalAlias.child)
+  }
+
+  test("mutateProject with mutationIndex 2 on a Decimal-free Project throws ShimMutationException") {
+    val projNode = findProject(bareProject())
+    intercept[ShimMutationException] {
+      shim.mutateProject(projNode, 2)
+    }
+  }
+
   test("mutateProject with mutationIndex 0 bypasses coalesce and preserves schema") {
     val projNode = findProject(coalesced())
     assert(projNode.projectList.exists(_.exists(_.isInstanceOf[Coalesce])))
@@ -670,5 +763,30 @@ class ShimImplSpec extends AnyFunSuite with BeforeAndAfterAll {
 
     val mutantId = DeterministicHasher.computeMutantId("test/path", coordinate.toHex, "WINDOW", 0)
     assert(mutantId == GOLDEN_WIN_MUTANT_ID)
+  }
+
+  test("golden cross-version: pinned canonical decimal-project query yields byte-identical NodeCoordinate and MutantID") {
+    // Canonical query: select(balance) over a single Decimal column — pins the
+    // DECIMAL_TO_DOUBLE discovery coordinate (Project mutationIndex 2). Pinned
+    // the same discipline as the goldens above: values frozen once, never
+    // recomputed from the code under test.
+    val GOLDEN_SIG = "#0"
+    val GOLDEN_COORDINATE = "a0caf5b87384f134"
+    val GOLDEN_MUTANT_ID = "bee810271c2f53d8"
+
+    val projNode = findProject(decimalProjected())
+
+    val sig = shim.canonicalExprSig(projNode, OperatorType.Project)
+    assert(sig == GOLDEN_SIG, s"decimal-project signature drifted:\n  got  = $sig\n  want = $GOLDEN_SIG")
+
+    val coordinate = NodeCoordinateFactory(0, OperatorType.Project, -1, sig)
+    assert(coordinate.toHex == GOLDEN_COORDINATE)
+
+    val (_, candidates) = shim.classify(projNode, 0, -1).getOrElse(fail("expected Project candidates"))
+    assert(candidates.map(_.mutationIndex) == Seq(1, 2))
+    assert(candidates.forall(_.coordinate.toHex == GOLDEN_COORDINATE))
+
+    val mutantId = DeterministicHasher.computeMutantId("test/path", coordinate.toHex, "PROJECT", 2)
+    assert(mutantId == GOLDEN_MUTANT_ID)
   }
 }

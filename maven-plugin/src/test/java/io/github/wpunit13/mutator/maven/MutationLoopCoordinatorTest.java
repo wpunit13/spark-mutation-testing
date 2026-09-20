@@ -117,6 +117,64 @@ class MutationLoopCoordinatorTest {
     }
 
     @Test
+    void forkTestResultsFlowIntoTheReport() throws Exception {
+        Map<String, SurefireExecutor.SurefireResult> outcomes = new LinkedHashMap<>();
+        outcomes.put(MUTANT_1, SurefireExecutor.SurefireResult.success(60L).withTestResults(
+                List.of("pipeline.OrdersPipelineTest.test1", "pipeline.OrdersPipelineTest.test2"),
+                List.of()));
+        outcomes.put(MUTANT_2, SurefireExecutor.SurefireResult.failure(60L, "Expected [42] but found [0]", 1).withTestResults(
+                List.of("pipeline.OrdersPipelineTest.test1"),
+                List.of("pipeline.OrdersPipelineTest.test1")));
+
+        StubExecutor mockExecutor = new StubExecutor(
+                tempDir,
+                List.of(meta(MUTANT_1), meta(MUTANT_2)),
+                outcomes);
+
+        MutationLoopCoordinator coordinator = new MutationLoopCoordinator(
+                mockExecutor, 2.0, tempDir.toFile(), 0.0);
+        coordinator.execute();
+
+        JsonNode report = mapper.readTree(tempDir.resolve("mutation-report.json").toFile());
+        JsonNode survived = mutantById(report, MUTANT_1);
+        JsonNode killed = mutantById(report, MUTANT_2);
+
+        // The survivor's mapped tests = the tests that ran against it — the
+        // fork path's conservative attribution (no TIA yet, whole suite runs).
+        assertEquals(2, survived.get("mappedTestIds").size());
+        assertEquals("pipeline.OrdersPipelineTest.test2", survived.get("mappedTestIds").get(1).asText());
+
+        // The killed mutant names its killer in the outcome detail.
+        assertEquals("KILLED", killed.get("result").get("status").asText());
+        String detail = killed.get("result").get("failureDetailOrNull").asText();
+        assertTrue(detail.contains("Failing tests:"), () -> detail);
+        assertTrue(detail.contains("pipeline.OrdersPipelineTest.test1"), () -> detail);
+    }
+
+    private JsonNode mutantById(JsonNode report, String mutantId) {
+        for (JsonNode m : report.get("mutants")) {
+            if (mutantId.equals(m.get("mutantId").asText())) {
+                return m;
+            }
+        }
+        throw new AssertionError("mutant missing from report: " + mutantId);
+    }
+
+    void perTestAttributionDisablesFailFastOnMutantForks() throws Exception {
+        Map<String, SurefireExecutor.SurefireResult> outcomes = new LinkedHashMap<>();
+        outcomes.put(MUTANT_1, SurefireExecutor.SurefireResult.success(50L));
+        StubExecutor mockExecutor = new StubExecutor(tempDir, List.of(meta(MUTANT_1, "t1")), outcomes);
+
+        MutationLoopCoordinator coordinator = new MutationLoopCoordinator(
+                mockExecutor, 2.0, tempDir.toFile(), 0.0, List.of(), List.of(), true);
+        coordinator.execute();
+
+        // Baseline: no fail-fast (unchanged). Mutant fork: fail-fast OFF so the
+        // surefire XML records every failing test for the test-value report.
+        assertFalse(mockExecutor.requests.get(0).isFailFast());
+        assertFalse(mockExecutor.requests.get(1).isFailFast());
+    }
+
     void forkSuccessWithoutAppliedMarkerIsReclassifiedNotApplied() throws Exception {
         // Pre-WP-17 this fork outcome classified as SURVIVED — the fake
         // survivor that corrupted the mutation score. The missing applied

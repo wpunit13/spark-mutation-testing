@@ -260,6 +260,7 @@ public final class ReportWriter {
             Path json = JsonReportWriter.write(outputDir, catalog, snapshot, config);
             SarifReportWriter.write(outputDir, catalog, snapshot);
             HtmlReportWriter.write(outputDir, catalog, snapshot);
+            TestValueReportWriter.write(outputDir, catalog, snapshot);
             return json.toAbsolutePath().toString();
         } catch (IOException e) {
             throw new IllegalStateException("Failed to write reports to " + outputDir, e);

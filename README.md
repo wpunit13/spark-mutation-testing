@@ -68,7 +68,16 @@ target_modules   = ["my_pipeline.transforms"]   # scope discovery
 excluded_mutators = ["CrossJoinMutator"]        # skip a rule
 timeout_multiplier = 2.0                        # per-mutant deadline
 min_mutation_score = 80.0                       # CI gate
+per_test_attribution = true                     # run every mapped test per mutant
+                                                # (no fail-fast) — enables meaningful
+                                                # test-value verdicts
 ```
+
+Alongside the mutation report you get `test-value-report.{json,html}`: per-test
+kill attribution that flags **redundant test cases** — tests whose kills are
+fully covered by other tests in the run (`REDUNDANT_CANDIDATE`) vs tests that
+uniquely catch at least one mutant (`LOAD_BEARING`). Verdicts are relative to
+the current suite; see `docs/CONTRACTS.md` §5.4.
 
 ---
 
@@ -166,7 +175,8 @@ flowchart LR
 3. **Mutation loop** — activate one mutant, run its mapped tests fail-fast.
 4. **Classify** — `KILLED` / `SURVIVED` / `TIMED_OUT` / `ERRORED`, then reset all
    Spark state so results can't leak between mutants.
-5. **Report** — terminal summary, `mutation-report.json`, SARIF, HTML.
+5. **Report** — terminal summary, `mutation-report.json`, SARIF, HTML, and the
+   per-test `test-value-report.{json,html}` (redundant-test flag).
 
 ---
 

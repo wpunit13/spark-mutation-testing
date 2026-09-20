@@ -256,6 +256,7 @@ table below) applies. The same values can be supplied per-invocation instead:
 | `minMutationScore` | `spark.mutator.minMutationScore` | `0.0` | score floor (`0.0` = gate off) |
 | `maxErroredCount` | `spark.mutator.maxErroredCount` | `0` | WP-24: max real-failure ERRORED (dead sessions, shim violations, mutation crashes); zero tolerance by default, negative disables |
 | `maxNotAppliedRatio` | `spark.mutator.maxNotAppliedRatio` | `0.20` | WP-24: max ratio of designed not-applied mutants (`notApplied / (total − skipped)`); negative disables |
+| `perTestAttribution` | `spark.mutator.perTestAttribution` | `false` | runs every mapped test per killed mutant (no fail-fast) so the report names ALL failing tests — feeds the test-value report's sole-killer verdicts; costs runtime on killed mutants |
 | `targetModules` | `spark.mutator.targetModules` | *(empty)* | comma-separated module-path prefixes limiting Discovery (see §3.1 for the engine-side semantics) |
 | `excludedMutators` | `spark.mutator.excludedMutators` | *(empty)* | comma-separated OperatorType names excluded from mutation; echoed into the report's `config.excludedMutators` block |
 | `exitProcessOnGateFailure` | `spark.mutator.exitProcessOnGateFailure` | `true` | `false` ⇒ a gate violation throws `MojoFailureException` (Maven exit code 1, reactor honors `--fail-at-end`/`--fail-never`) instead of terminating the JVM with the dedicated exit code 2 — the multi-module escape hatch |
@@ -478,6 +479,28 @@ Written to the report directory (see §3.2):
 | `mutation-report.json` | schema v2 (`docs/CONTRACTS.md` §5.3; v2 adds the WP-24 `NOT_APPLIED` split) |
 | `mutation-report.sarif` | SARIF 2.1.0; `SURVIVED` = `warning`, `ERRORED` = `error`, `KILLED`/`TIMED_OUT` omitted |
 | `mutation-report.html` | self-contained (inline CSS, no external assets) |
+| `test-value-report.json` / `.html` | per-test kill attribution (see below) |
+
+### 5.1 Test value report (per-test redundancy flag)
+
+`test-value-report.{json,html}` answers a question the mutation score cannot:
+**which test cases are redundant?** A test is `LOAD_BEARING` when at least one
+mutant exists whose *only* failing test is this one (remove the test and that
+mutant escapes); a test with zero sole kills is a `REDUNDANT_CANDIDATE` —
+everything it catches, another test in this run also catches.
+
+Verdicts are **relative to the current suite**, never absolute: delete the
+load-bearing test and the "redundant" ones suddenly matter. Verdicts also
+require per-mutant failing-test attribution:
+
+| Path | Attribution | Verdicts |
+|---|---|---|
+| Maven fork (Java/Scala) | all failing tests per mutant with `spark.mutator.perTestAttribution=true`; otherwise the fork aborts at the first failure (first killer only) | meaningful with the flag; biased without |
+| PySpark | all failing tests only with `per_test_attribution = true` (otherwise fail-fast records the first killer) | meaningful with the flag; biased without |
+| JUnit 5 in-process (incl. Gradle thin path) | none recorded | `INSUFFICIENT_DATA` |
+
+`attributionCoverage` (killed mutants with named failing tests / total killed)
+quantifies the fidelity; the HTML report carries the same caveat.
 
 Any catalogued mutant with no recorded outcome is synthesized as `ERRORED`, so
 the schema never carries a null result. The whole pipeline is driven by

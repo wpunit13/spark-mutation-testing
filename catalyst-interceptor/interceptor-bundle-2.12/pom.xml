@@ -33,17 +33,18 @@
 
     LINKAGE STATUS (read before relying on this jar)
     ------------------------------------------------
-    The non-shim Scala layers (api, dispatch, runtime) are consumed from the
-    reactor, which compiles them against the reactor-default Scala 2.13; only
-    the shim layer (Spark35ShimBase + ShimImpl) is 2.12-compiled. The erased
-    JVM descriptors of the SPI differ between Scala 2.12 and 2.13 (e.g. the
-    `Seq` in PlanMutatorShim.classify erases to different types), so mounting
-    this jar on a 2.12-built PySpark is NOT yet proven to link. The api classes
-    are taken from the reactor artifact (shade-excluding the shim jar's copies)
-    so exactly one api copy ships, paired with the dispatch/runtime layers it
-    was compiled against. Full 2.12 support requires per-combination
-    compilation of api/dispatch/runtime — flagged as a spec gap in the WP-19
-    final report.
+    Resolved (was the WP-19 flagged gap): this module — like
+    interceptor-bundle-4.2 — RECOMPILES the version-agnostic api, dispatch and
+    runtime layers FROM SOURCE against THIS combination's Spark 3.5.3 /
+    Scala 2.12.18 (build-helper add-source below), instead of shading the
+    reactor's 2.13-compiled artifacts. The erased JVM descriptors of the SPI
+    differ between Scala 2.12 and 2.13 (e.g. the `Seq` in
+    PlanMutatorShim.classify erases to different types; ShimDispatcher's
+    asScala calls bind to different helpers), so shading the reactor's 2.13
+    classes produced a jar that failed to link on a 2.12-built PySpark
+    (NoSuchMethodError on scala.jdk.CollectionConverters). mutator-core is
+    pure Java (no Spark imports, enforced by the CI gate) and is consumed as
+    the reactor artifact.
 
     NO PACKAGE RELOCATION
     ---------------------
@@ -70,8 +71,11 @@
 
   <dependencies>
     <!--
-      All five bundled modules at compile scope so the shade plugin includes
-      them. Spark itself stays provided/excluded and is never bundled.
+      The 2.12 shim (brings ShimImpl + Spark35ShimBase + its META-INF/services
+      entry) and the pure-Java core. The version-agnostic Scala layers are NOT
+      taken as artifacts: they are recompiled from source below against
+      Scala 2.12 — the reactor's api/dispatch/runtime artifacts are
+      2.13-compiled and do not link on a 2.12 Spark runtime.
     -->
     <dependency>
       <groupId>io.github.wpunit13</groupId>
@@ -79,21 +83,19 @@
     </dependency>
     <dependency>
       <groupId>io.github.wpunit13</groupId>
-      <artifactId>interceptor-api</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>io.github.wpunit13</groupId>
-      <artifactId>interceptor-dispatch</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>io.github.wpunit13</groupId>
-      <artifactId>interceptor-runtime</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>io.github.wpunit13</groupId>
       <artifactId>interceptor-spark-3.5_2.12</artifactId>
       <!-- Version-free: pinned by the root pom's dependencyManagement, per the
            reactor convention that child modules declare no versions. -->
+    </dependency>
+
+    <!--
+      Compile-time-only logging API for the recompiled runtime layer (provided:
+      the Spark 3.5 driver supplies slf4j-api and its binding at runtime).
+    -->
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-api</artifactId>
+      <scope>provided</scope>
     </dependency>
 
     <dependency>
@@ -112,6 +114,33 @@
     <finalName>interceptor-spark-3.5_2.12</finalName>
 
     <plugins>
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>build-helper-maven-plugin</artifactId>
+        <version>3.5.0</version>
+        <executions>
+          <execution>
+            <id>add-version-agnostic-sources</id>
+            <phase>generate-sources</phase>
+            <goals>
+              <goal>add-source</goal>
+            </goals>
+            <configuration>
+              <sources>
+                <!-- Recompiled against THIS combination's Spark 3.5.3 / Scala 2.12
+                     (see the LINKAGE STATUS section in the description). -->
+                <source>${project.basedir}/../interceptor-api/src/main/scala</source>
+                <source>${project.basedir}/../interceptor-dispatch/src/main/scala</source>
+                <source>${project.basedir}/../interceptor-runtime/src/main/scala</source>
+              </sources>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>net.alchim31.maven</groupId>
+        <artifactId>scala-maven-plugin</artifactId>
+      </plugin>
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-shade-plugin</artifactId>

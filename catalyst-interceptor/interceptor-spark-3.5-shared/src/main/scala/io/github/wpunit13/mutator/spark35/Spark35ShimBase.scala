@@ -2,14 +2,14 @@ package io.github.wpunit13.mutator.spark35
 
 import io.github.wpunit13.mutator.api._
 import org.apache.spark.sql.catalyst.expressions.{
-  Alias, And, Ascending, Attribute, AttributeReference, Coalesce, Descending,
+  Alias, And, Ascending, Attribute, AttributeReference, Cast, Coalesce, Descending,
   Expression, Literal, NamedExpression, Not, SortOrder, SpecifiedWindowFrame,
   UnaryMinus, UnboundedPreceding, WindowExpression
 }
 import org.apache.spark.sql.catalyst.expressions.aggregate.{AggregateExpression, AggregateFunction, Count, Max, Min, Sum}
-import org.apache.spark.sql.catalyst.plans.{Cross, JoinType, LeftAnti, LeftOuter}
+import org.apache.spark.sql.catalyst.plans.{Cross, Inner, JoinType, LeftAnti, LeftOuter}
 import org.apache.spark.sql.catalyst.plans.logical.{Aggregate, Filter, Join, LogicalPlan, Project, Window}
-import org.apache.spark.sql.types.BooleanType
+import org.apache.spark.sql.types.{BooleanType, DecimalType, DoubleType}
 
 /**
  * Version-agnostic mutation logic shared by the Spark 3.5.x / Scala 2.12 and
@@ -33,16 +33,20 @@ abstract class Spark35ShimBase extends PlanMutatorShim {
       // Read-only: no new LogicalPlan/Expression is constructed here.
       val coord = NodeCoordinateFactory(depth, OperatorType.Join, childOrdinal,
         canonicalExprSig(node, OperatorType.Join))
-      val targets: Seq[(Int, String, JoinType)] = Seq(
-        (0, "INNER -> LEFT", LeftOuter),
-        (1, "INNER -> CROSS", Cross),
-        (2, "INNER -> ANTI", LeftAnti)
+      val targets: Seq[(Int, JoinType)] = Seq(
+        (0, LeftOuter),
+        (1, Cross),
+        (2, LeftAnti)
       )
       // Omit no-op mutants whose target equals the node's current join type.
+      // The description renders the node's ACTUAL source type, so a LEFT/CROSS/
+      // ANTI join reports truthfully ("LEFT -> CROSS"); an INNER source stays
+      // byte-identical to the original static strings ("INNER -> LEFT", ...).
       val candidates = targets
-        .filterNot { case (_, _, target) => j.joinType == target }
-        .map { case (index, description, _) =>
-          MutationCandidate(coord, OperatorType.Join, index, description)
+        .filterNot { case (_, target) => j.joinType == target }
+        .map { case (index, target) =>
+          MutationCandidate(coord, OperatorType.Join, index,
+            s"${joinShortForm(j.joinType)} -> ${joinShortForm(target)}")
         }
       Some((OperatorType.Join, candidates))
 
@@ -101,6 +105,9 @@ abstract class Spark35ShimBase extends PlanMutatorShim {
       if (p.projectList.nonEmpty) {
         builder += MutationCandidate(coord, OperatorType.Project, 1, "INJECT_NULL")
       }
+      if (p.projectList.exists(_.dataType.isInstanceOf[DecimalType])) {
+        builder += MutationCandidate(coord, OperatorType.Project, 2, "DECIMAL_TO_DOUBLE")
+      }
       val candidates = builder.result()
       if (candidates.nonEmpty) {
         Some((OperatorType.Project, candidates))
@@ -114,6 +121,16 @@ abstract class Spark35ShimBase extends PlanMutatorShim {
   private def isTopLevelAnd(condition: Expression): Boolean = condition match {
     case _: And => true
     case _      => false
+  }
+
+  /** Report-facing short form. INNER/LEFT/CROSS/ANTI match the original static
+    * descriptions byte-for-byte; anything else falls back to JoinType.sql. */
+  private def joinShortForm(jt: JoinType): String = jt match {
+    case Inner     => "INNER"
+    case LeftOuter => "LEFT"
+    case Cross     => "CROSS"
+    case LeftAnti  => "ANTI"
+    case other     => other.sql
   }
 
   override def mutateJoin(node: LogicalPlan, mutationIndex: Int): LogicalPlan = node match {
@@ -299,8 +316,25 @@ abstract class Spark35ShimBase extends PlanMutatorShim {
           }
           p.copy(projectList = p.projectList.updated(idx, nullExpr))
 
+        case 2 =>
+          val targetIdx = p.projectList.indexWhere(_.dataType.isInstanceOf[DecimalType])
+          if (targetIdx < 0) {
+            throw new ShimMutationException(
+              "mutationIndex 2 requires at least one Decimal-typed project expression")
+          }
+          val targetExpr = p.projectList(targetIdx)
+          val castExpr: NamedExpression = targetExpr match {
+            case alias: Alias =>
+              alias.copy(child = Cast(alias.child, DoubleType), name = alias.name)(
+                alias.exprId, alias.qualifier, alias.explicitMetadata, alias.nonInheritableMetadataKeys)
+            case other =>
+              Alias(Cast(other, DoubleType), other.name)(
+                other.exprId, other.qualifier, None, Nil)
+          }
+          p.copy(projectList = p.projectList.updated(targetIdx, castExpr))
+
         case other => throw new ShimMutationException(
-          s"Unknown project mutationIndex $other; expected 0 or 1")
+          s"Unknown project mutationIndex $other; expected 0, 1 or 2")
       }
 
     case other => throw new ShimMutationException(

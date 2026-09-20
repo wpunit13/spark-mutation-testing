@@ -7,6 +7,7 @@ import io.github.wpunit13.mutator.model.MutantResult;
 import io.github.wpunit13.mutator.model.MutantStatus;
 import io.github.wpunit13.mutator.report.AppliedMarkerStore;
 import io.github.wpunit13.mutator.report.DiffSnippetStore;
+import io.github.wpunit13.mutator.report.FailingTests;
 import io.github.wpunit13.mutator.report.OutcomeFileStore;
 import io.github.wpunit13.mutator.report.ReportWriter;
 import org.apache.maven.plugin.MojoExecutionException;
@@ -56,6 +57,11 @@ public class MutationLoopCoordinator {
     private final double minMutationScore;
     private final List<String> targetModules;
     private final List<String> excludedMutators;
+    /** When true, mutant forks run without fail-fast so the surefire XML
+      * records ALL failing tests (complete kill matrix for the test-value
+      * report); when false (default), the fork aborts after the first
+      * failure and only the first killer is attributed. */
+    private final boolean perTestAttribution;
 
     public MutationLoopCoordinator(
             SurefireExecutor surefireExecutor,
@@ -73,6 +79,18 @@ public class MutationLoopCoordinator {
             double minMutationScore,
             List<String> targetModules,
             List<String> excludedMutators) {
+        this(surefireExecutor, timeoutMultiplier, outputDirectory, minMutationScore,
+                targetModules, excludedMutators, false);
+    }
+
+    public MutationLoopCoordinator(
+            SurefireExecutor surefireExecutor,
+            double timeoutMultiplier,
+            File outputDirectory,
+            double minMutationScore,
+            List<String> targetModules,
+            List<String> excludedMutators,
+            boolean perTestAttribution) {
         this.surefireExecutor = Objects.requireNonNull(surefireExecutor, "surefireExecutor must not be null");
         this.timeoutMultiplier = timeoutMultiplier > 0.0 ? timeoutMultiplier : 2.0;
         this.outputDirectory = outputDirectory != null
@@ -81,6 +99,7 @@ public class MutationLoopCoordinator {
         this.minMutationScore = minMutationScore;
         this.targetModules = targetModules == null ? List.of() : List.copyOf(targetModules);
         this.excludedMutators = excludedMutators == null ? List.of() : List.copyOf(excludedMutators);
+        this.perTestAttribution = perTestAttribution;
     }
 
     public MutationLoopCoordinator(SurefireExecutor surefireExecutor) {
@@ -135,12 +154,18 @@ public class MutationLoopCoordinator {
                     new SurefireExecutor.SurefireRequest(
                             mutantProperties(mutantId),
                             testFilter,
-                            true,
+                            // fail-fast off under perTestAttribution: the fork
+                            // runs the whole suite so the surefire XML records
+                            // every failing test (sole-killer attribution).
+                            !perTestAttribution,
                             timeoutMillis));
 
-            MutantResult outcome = classify(mutantId, mutantResult, timeoutMillis);
+            MutantResult outcome = withFailingTests(
+                    classify(mutantId, mutantResult, timeoutMillis),
+                    mutantResult.getFailedTestIds());
             writeOutcome(outcome);
             mergeDiffSnippet(catalog, mutantId);
+            attributeExecutedTests(catalog, mutantId, mutantResult.getExecutedTestIds());
 
             switch (outcome.getStatus()) {
                 case KILLED -> killed++;
@@ -277,6 +302,57 @@ public class MutationLoopCoordinator {
         throw new MojoExecutionException(
                 "Contract violation: diff snippet sidecar references unknown mutantId '"
                         + mutantId + "'.");
+    }
+
+    /**
+     * Names the tests whose failure killed the mutant, appended to the KILLED
+     * outcome's detail so the report answers "which test caught it" without
+     * digging through per-fork surefire output (which each subsequent fork
+     * overwrites). Other statuses keep their detail untouched.
+     */
+    private MutantResult withFailingTests(MutantResult outcome, List<String> failedTestIds) {
+        if (outcome.getStatus() != MutantStatus.KILLED || failedTestIds == null || failedTestIds.isEmpty()) {
+            return outcome;
+        }
+        // Format owned by report.FailingTests so every path emits (and any
+        // consumer parses) one identical attribution block.
+        String detail = FailingTests.append(outcome.getFailureDetailOrNull(), failedTestIds);
+        return new MutantResult(
+                outcome.getMutantId(),
+                outcome.getStatus(),
+                outcome.getElapsedMillis(),
+                detail,
+                outcome.getRecordedAtEpochMillis());
+    }
+
+    /**
+     * Attributes the fork's executed tests to the mutant's catalog entry.
+     * The fork path runs the whole suite per mutant (no test impact analysis
+     * yet), so the conservative mapping is "every test that ran" — which is
+     * exactly what the report's mappedTests cell should list. No-op when the
+     * fork produced no parseable test results.
+     */
+    private void attributeExecutedTests(List<MutantMetadata> catalog, String mutantId, List<String> executedTestIds) {
+        if (executedTestIds == null || executedTestIds.isEmpty()) {
+            return;
+        }
+        for (int i = 0; i < catalog.size(); i++) {
+            MutantMetadata meta = catalog.get(i);
+            if (!meta.getMutantId().equals(mutantId) || meta.getMappedTestIds().equals(executedTestIds)) {
+                continue;
+            }
+            catalog.set(i, new MutantMetadata(
+                    meta.getMutantId(),
+                    meta.getFilePath(),
+                    meta.getLineNumber(),
+                    meta.getOperatorType(),
+                    meta.getMutationIndex(),
+                    meta.getDescription(),
+                    meta.getCoordinateHex(),
+                    meta.getAstDiffSnippet(),
+                    executedTestIds));
+            return;
+        }
     }
 
     /**
