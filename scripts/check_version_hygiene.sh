@@ -4,14 +4,11 @@ set -euo pipefail
 # WP-19 version-hygiene merge guard (docs/RELEASING.md Rule 1).
 #
 # Runs as a PR-triggered CI step. Two checks, both fail with a message citing
-# Rule 1 ("versions change only via scripts/prepare_release.sh on main"):
+# Rule 1 ("versions change only in the release workflow, stamped from the
+# tag"):
 #
 #   a) STATE: the resolved project version on the PR head ends in -SNAPSHOT.
-#      Non-SNAPSHOT versions exist only in script-created release commits,
-#      which never go through PRs — so any PR head that is not a SNAPSHOT is a
-#      hand-edit. (Only the Maven project version is checked: the Python
-#      wheel's day-to-day version is a plain PEP 440 version and is covered by
-#      the diff check below.)
+#      main is a permanent dev marker; nothing in a PR should change it.
 #
 #   b) DIFF: no <version> line in any pom.xml that already exists at the
 #      merge-base, nor the version field in python/pyproject.toml, added or
@@ -24,18 +21,13 @@ set -euo pipefail
 #      subject contains [version-bump] are exempt (legitimate dependency
 #      upgrades).
 #
-# Deliberately NOT a state-equality check ("branch version == main version"):
-# that fails legitimately whenever a release's post-release bump lands on main
-# while a feature branch is open.
-#
-# Configuration: BASE_REF (default origin/main) names the PR's target branch.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "$REPO_ROOT"
 
 BASE_REF="${BASE_REF:-origin/main}"
-RULE1_MSG="docs/RELEASING.md Rule 1: versions change only via scripts/prepare_release.sh on main"
+RULE1_MSG="docs/RELEASING.md Rule 1: versions change only in the release workflow, stamped from the tag"
 
 # --- resolve the merge base -------------------------------------------------
 
@@ -78,7 +70,7 @@ case "$pom_version" in
     *)
         echo "ERROR: the PR head's project version is '$pom_version', not a -SNAPSHOT." >&2
         echo "Rule 1: $RULE1_MSG" >&2
-        echo "Non-SNAPSHOT versions exist only in script-created release commits, which never go through PRs — this looks like a hand edit." >&2
+        echo "main's version is a permanent dev marker; PRs never change it." >&2
         exit 1
         ;;
 esac

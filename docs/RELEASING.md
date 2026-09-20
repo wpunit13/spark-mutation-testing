@@ -1,89 +1,59 @@
 # Releasing spark-mutator
 
-The runbook for cutting a release. If you remember only one rule, make it
-**Rule 1** below.
+Runbook for cutting a release. The model: **the tag is the only version
+decision; the workflow stamps it at build time.** If you remember only one
+rule, make it **Rule 1** below.
 
-> **Status (WP-22):** the release tooling now exists — `scripts/prepare_release.sh`
-> and `.github/workflows/release.yml` implement this document. This document
-> remains the normative process the tooling implements. The human one-time
-> prerequisites (§7) are needed before the first release regardless.
+> **Status (WP-22 v2):** tag-stamped releases. The release workflow derives
+> the published version from the pushed tag and stamps the POM + pyproject
+> versions in the build workspace (never committed). The human one-time
+> prerequisites (§6) are needed before the first release regardless.
 
 ---
 
 ## 1. Base Rule
 
-**Do not edit POM or `pyproject.toml` versions by hand. Ever.**
+**Never hand-edit POM or `pyproject.toml` versions. Ever.**
 
-The only version-changing action in this repository is running
-`scripts/prepare_release.sh <version>` on a green `main`. Every manual
-`versions:set`, hand-edited `<version>`, or ad-hoc `git tag` is a way to
-publish the wrong coordinates to immutable repositories.
+Versions change only inside the release workflow, derived from the pushed
+tag. `main` stays at its dev-marker version (`1.0.0-SNAPSHOT`, pyproject
+`0.1.0`) forever — it is never published. The version-hygiene CI guard fails
+any PR that touches version lines (escape hatch: a `[version-bump]` commit
+subject for legitimate dependency upgrades).
 
 ---
 
 ## 2. The version model (what lives where)
 
-| Place | Version | Who changes it |
+| Place | Version | Who sets it |
 |---|---|---|
-| `main` (day to day) | `X.Y.Z-SNAPSHOT` | Nobody. Frozen between releases. |
-| The **release commit** | exact `X.Y.Z` | `prepare_release.sh`, once per release |
-| The **tag** `vX.Y.Z` | points at the release commit | You, right after running the script |
-| Maven Central / PyPI | `X.Y.Z` | The workflow, derived **from the tag** |
+| `main` (day to day) | dev marker: `1.0.0-SNAPSHOT` / pyproject `0.1.0` | Nobody — frozen forever |
+| The tag `vX.Y.Z` | exact `X.Y.Z` | You, at release time |
+| Maven Central / PyPI | `X.Y.Z` | The workflow, stamped from the tag |
 
-The published version is derived from the tag, and a guard verifies the
-tagged commit's POM agrees — a tag/POM mismatch **fails the build** instead of
-publishing wrong coordinates. Tag version and POM version are two views of one
-decision, never independent inputs.
+One decision (the tag), one derivation (the stamp). No release commits, no
+post-release bumps, no POM/tag reconciliation — the tag cannot diverge from
+the published version because the published version IS the tag.
 
 ---
 
-## 3. The cycle
+## 3. The ritual (copy-paste)
 
-```
-v1.0.0 published
-   │
-   ▼
-main = 1.0.1-SNAPSHOT          ← the script bumped it for you (post-release step)
-   │
-   ├── start new development   ← branch (or commit on main): NO version edits
-   ├── merge PRs               ← main stays 1.0.1-SNAPSHOT
-   │
-   ▼  "I'm ready to release"
-prepare_release.sh 1.0.1       ← the ONLY time versions change (release commit)
-git tag v1.0.1 && push         ← publish; script bumps main to 1.0.2-SNAPSHOT
-   │
-   ▼
-repeat
-```
+1. Confirm CI is green on the `main` commit you want to release.
+2. Create the tag on `main`:
+   - GitHub UI → Releases → Draft a new release → new tag `v1.0.0` → target
+     `main` → Publish; or
+   - `git tag v1.0.0 && git push origin v1.0.0`.
+3. Watch the `Release` workflow: **guard → publish-maven → publish-pypi →
+   smoke-test**, all green before announcing anything.
+4. First release only: approve the deployment in the Central Portal UI
+   (`autoPublish=false`); the smoke-test job polls Central for up to 30
+   minutes so the review delay does not fail the run.
 
-- **Starting new development after a release:** touch nothing — the
-  post-release bump already set the next SNAPSHOT.
-- **Long-lived feature branch** open during a release: merge as usual
-  afterwards. Feature branches never edit POMs, so the merge has no version
-  conflict; main's SNAPSHOT simply continues.
+That is the whole release. No local commits, no branch, no PR — releases
+never push to `main`.
 
----
-
-## 4. The ritual (copy-paste)
-
-```bash
-git checkout main && git pull          # release ALWAYS from green main
-scripts/prepare_release.sh 1.0.1      # versions:set + pyproject sync + release commit
-                                      #   + post-release SNAPSHOT bump (both committed)
-git tag v1.0.1
-git push origin main v1.0.1           # tag push triggers publish
-```
-
-The script creates TWO commits: the release commit (`release: v1.0.1`, exact
-version) and the post-release bump (`1.0.2-SNAPSHOT`). It prints the exact
-tag+push commands; tagging and pushing stay human actions.
-
-Then watch the `release` workflow: **guard → publish-maven → publish-pypi →
-smoke-test**, all green before announcing anything. The workflow derives the
-version FROM the tag and a guard step fails the build on a tag/POM mismatch
-instead of publishing wrong coordinates.
-
-Choosing the number (`<version>`):
+Choosing the number (`X.Y.Z`):
 
 | Change since last release | Bump | Example |
 |---|---|---|
@@ -97,40 +67,43 @@ must never exist.
 
 ---
 
-## 5. What the tag triggers
+## 4. What the tag triggers
 
 1. **Guard** — `GITHUB_REF_NAME` must match `^v[0-9]+\.[0-9]+\.[0-9]+$`.
    Non-matching tags skip silently. (The glob `v*.*.*` alone is NOT numeric:
    `v1.0.0-rc1` matches it, and Central is immutable.)
-2. **publish-maven** — signs with GPG and deploys the public surface to Maven
-   Central via the Central Portal token.
-3. **publish-pypi** — rebuilds the wheel from the same run's jars, publishes
-   to PyPI via OIDC trusted publishing.
-4. **smoke-test** — installs the wheel from PyPI and resolves the plugin +
+2. **On-main guard** — the tagged commit must be an ancestor of `origin/main`
+   (releases are cut from green `main` only).
+3. **publish-maven** — stamps the POM version from the tag in the workspace
+   (`mvn versions:set`, never committed), signs with GPG, deploys the public
+   surface to Maven Central via the Central Portal token.
+4. **publish-pypi** — stamps the pyproject version, rebuilds the wheel from
+   the same run's jars, publishes to PyPI via OIDC trusted publishing.
+5. **smoke-test** — installs the wheel from PyPI and resolves the plugin +
    bundle from Central by coordinate.
 
 First release only: the Maven job lands in the Central Portal for **manual
 review** (`autoPublish=false`, set in the root POM's `release` profile) —
-approve it in the Portal UI. The `smoke-test` job polls Central for up to 30
-minutes so the review delay does not fail the run. Flip `autoPublish` to
-`true` in a LATER change, never in the packet/change that first publishes.
+approve it in the Portal UI. Flip `autoPublish` to `true` in a LATER change,
+never in the change that first publishes.
 
 ---
 
-## 6. Guard rails — things that would hurt
+## 5. Guard rails — things that would hurt
 
 - **Central is immutable.** A bad release is fixed by a *new* version, never
   by re-publishing. Never move or delete a pushed `vX.Y.Z` tag.
-- **Never release from a branch** or from a non-green main.
+- **Never release from a non-green main.** The workflow's on-main guard
+  enforces the tag's commit is on `main`; greenness is your judgment call.
 - **Never publish pre-release tags** (`v1.0.0-rc1` is rejected by the guard).
   If pre-releases are ever wanted, that is a deliberate workflow change, not a
   tag-time improvisation.
 - **Secrets never enter the repo** — they live in GitHub repository settings
-  (see §7).
+  (see §6).
 
 ---
 
-## 7. One-time human prerequisites (before the very first release)
+## 6. One-time human prerequisites (before the very first release)
 
 1. **Maven Central Portal** account with the verified namespace
    `io.github.wpunit13` (verification via a temporary verification key in the
@@ -145,3 +118,18 @@ minutes so the review delay does not fail the run. Flip `autoPublish` to
    `spark-mutation-testing-maven-plugin`, and one
    `interceptor-bundle-spark-<ver>_<scala>` per supported combo. Everything
    else stays internal.
+
+---
+
+## 7. Design note — why there are no release commits
+
+WP-22 v1 created a release commit (exact version) plus a post-release bump on
+`main`, so the POM at the tagged commit equaled the tag. That required direct
+pushes to `main` and fought branch protection; every release needed a local
+script, a release branch, a PR, and a SHA-targeted tag.
+
+V2 dissolves the constraint those commits served: the tag is the single
+version decision and the workflow stamps everything else in the build
+workspace. `main`'s version is a dev marker that never changes, so the
+version-hygiene guard reduces to a pure hand-edit tripwire, and the release
+ritual is tag-only.

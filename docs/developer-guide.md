@@ -629,36 +629,27 @@ writes `catalog.json` and applied markers.
 
 The full procedure, guard rails, and failure modes live in
 [`RELEASING.md`](RELEASING.md) — that runbook is normative, this section is the
-quick path. One rule to remember: **versions change only via
-`scripts/prepare_release.sh` on green `main`** (never hand-edit POM or
-`pyproject.toml` versions).
+quick path. One rule to remember: **versions change only in the release
+workflow, stamped from the pushed tag** (never hand-edit POM or
+`pyproject.toml` versions; `main`'s dev-marker version never changes).
 
-```bash
-git checkout main && git pull          # release ALWAYS from green main
-scripts/prepare_release.sh 1.0.1      # release commit + post-release SNAPSHOT bump
-git tag v1.0.1
-git push origin main v1.0.1           # tag push triggers publish
-git tag -d v1.0.1 && git push origin :refs/tags/v1.0.1
+```text
+1. Confirm CI green on the main commit to release
+2. Tag it:  GitHub UI → Releases → new tag v1.0.0 on main → Publish
+            (or: git tag v1.0.0 && git push origin v1.0.0)
+3. Watch the Release workflow: guard → publish-maven → publish-pypi → smoke-test
+4. First release only: approve the deployment in the Central Portal UI
 ```
 
-What the tag push triggers (`.github/workflows/release.yml`):
+The workflow derives the version FROM the tag and stamps it into the POM and
+pyproject in the build workspace (never committed) — the published version
+cannot diverge from the tag because it IS the tag. Releases never push to
+`main`; no release commits, no version bumps.
 
-1. **guard** — strict numeric regex on the tag (a loose `v*.*.*` glob alone
-   would admit `v1.0.0-rc1`); non-matching tags skip silently.
-2. **publish-maven** — verifies POM version == tag version, imports the GPG
-   key, then `mvn -Prelease clean deploy`: sources + javadoc/scaladoc jars,
-   GPG signing, Central Portal upload via `central-publishing-maven-plugin`
-   (server id `central`; only the public surface — internal shims/layers are
-   `excludeArtifacts`).
-3. **publish-pypi** — bundles the SAME run's jars into the wheel,
-   `twine check`, publishes via OIDC trusted publishing (environment
-   `release`; no API token).
-4. **smoke-test** — installs the wheel from PyPI and asserts the bundled
-   jars exist; resolves the plugin + a bundle from Central by coordinate
-   (with polling — the first release sits in the Portal for manual review
-   because `autoPublish=false`).
+First release only: the Maven deployment sits in the Portal for manual review
+(`autoPublish=false`) and Central's CDN sync lags a few minutes even after
+approval — the smoke-test job polls instead of failing fast.
 
-First release only: approve the Maven deployment in the Central Portal UI.
 Central is immutable — a bad release is fixed by a NEW version, never by
 re-publishing or moving a tag.
 
