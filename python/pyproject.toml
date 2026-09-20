@@ -34,6 +34,7 @@ dependencies = [
 [project.urls]
 Homepage = "https://github.com/wpunit13/spark-mutation-testing"
 Repository = "https://github.com/wpunit13/spark-mutation-testing"
+Documentation = "https://github.com/wpunit13/spark-mutation-testing/tree/main/docs"
 Issues = "https://github.com/wpunit13/spark-mutation-testing/issues"
 
 [project.optional-dependencies]
