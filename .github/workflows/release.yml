@@ -123,15 +123,17 @@ jobs:
       # Tests are NOT re-run here: releases cut only from green main (CI
       # already ran the full matrix on this commit). The version stamp is
       # workspace-only — main's dev-marker version is never committed.
+      # Passphrase flows via MAVEN_GPG_PASSPHRASE (the non-deprecated channel;
+      # -Dgpg.passphrase leaks into process args).
       - name: Stamp release version and deploy to Maven Central
         run: |
           mvn -B -q versions:set -DnewVersion="$VERSION" -DgenerateBackupPoms=false
-          mvn -B -Prelease clean deploy -DskipTests -Dgpg.passphrase="$GPG_PASSPHRASE"
+          mvn -B -Prelease clean deploy -DskipTests
         env:
           VERSION: ${{ needs.guard.outputs.version }}
+          MAVEN_GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
           CENTRAL_USERNAME: ${{ secrets.CENTRAL_USERNAME }}
           CENTRAL_PASSWORD: ${{ secrets.CENTRAL_PASSWORD }}
-          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
 
       # The wheel must embed the SAME jars this run published to Central.
       - name: Upload bundle jars for the PyPI job
@@ -180,7 +182,9 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: interceptor-bundles
-          path: .
+          # upload-artifact strips the common ancestor (catalyst-interceptor/)
+          # from the zip; extracting here restores the bundle_jars.py glob paths
+          path: catalyst-interceptor
 
       - name: Rebuild bundle jars from the tagged source (pypi-only recovery)
         if: github.event_name == 'workflow_dispatch' && inputs.jobs == 'pypi-only'
