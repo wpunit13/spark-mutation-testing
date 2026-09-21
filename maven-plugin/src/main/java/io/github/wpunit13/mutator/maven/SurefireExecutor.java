@@ -157,7 +157,12 @@ public class SurefireExecutor {
         }
         try {
             SurefireTestResults parsed = parseSurefireReports(reportsDir);
-            return result.withTestResults(parsed.executedTestIds(), parsed.failedTestIds(), parsed.testTimeMillis());
+            SurefireResult enriched = result.withTestResults(
+                    parsed.executedTestIds(), parsed.failedTestIds(), parsed.testTimeMillis());
+            if (!parsed.errorDetails().isEmpty()) {
+                enriched = enriched.withFailureDetailEnriched(parsed.errorDetails());
+            }
+            return enriched;
         } catch (Exception e) {
             return result;
         }
@@ -166,8 +171,13 @@ public class SurefireExecutor {
     /** Parsed view of one fork's surefire XML reports. testTimeMillis sums
       * the testsuite {@code time} attributes (suite wall time incl. setup),
       * the fork's non-orchestration time — its complement against the fork's
-      * wall clock is the fixed per-fork overhead (JVM spawn + booter + teardown). */
-    record SurefireTestResults(List<String> executedTestIds, List<String> failedTestIds, long testTimeMillis) {
+      * wall clock is the fixed per-fork overhead (JVM spawn + booter + teardown).
+      * errorDetails carries the first test exception's rendered chain (message
+      * attribute + stack text) per report file — the structural-invalidation
+      * markers live in nested causes that the surefire mojo's own summary
+      * message never surfaces. */
+    record SurefireTestResults(List<String> executedTestIds, List<String> failedTestIds,
+                               long testTimeMillis, List<String> errorDetails) {
     }
 
     /** Parses every TEST-*.xml in {@code reportsDir}. Executed = every
@@ -176,9 +186,10 @@ public class SurefireExecutor {
     static SurefireTestResults parseSurefireReports(Path reportsDir) throws IOException {
         List<String> executed = new ArrayList<>();
         List<String> failed = new ArrayList<>();
+        List<String> errorDetails = new ArrayList<>();
         double suiteTimeSeconds = 0.0;
         if (reportsDir == null || !Files.isDirectory(reportsDir)) {
-            return new SurefireTestResults(List.of(), List.of(), 0L);
+            return new SurefireTestResults(List.of(), List.of(), 0L, List.of());
         }
         DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
         try {
@@ -213,6 +224,10 @@ public class SurefireExecutor {
                         if (tc.getElementsByTagName("failure").getLength() > 0
                                 || tc.getElementsByTagName("error").getLength() > 0) {
                             failed.add(id);
+                            String detail = firstExceptionDetail(tc);
+                            if (detail != null && errorDetails.size() < 8) {
+                                errorDetails.add(detail);
+                            }
                         }
                     }
                 } catch (Exception e) {
@@ -224,7 +239,29 @@ public class SurefireExecutor {
         executed.sort(String::compareTo);
         failed.sort(String::compareTo);
         return new SurefireTestResults(List.copyOf(executed), List.copyOf(failed),
-                Math.round(suiteTimeSeconds * 1000.0));
+                Math.round(suiteTimeSeconds * 1000.0), List.copyOf(errorDetails));
+    }
+
+    /** The first {@code <error>}/{@code <failure>} child's rendered exception
+      * chain: {@code type: message} plus the stack text (which carries the
+      * {@code Caused by:} chain the structural-invalidation matcher needs).
+      * Truncated to keep the outcome file bounded. */
+    private static String firstExceptionDetail(Element testcase) {
+        NodeList errors = testcase.getElementsByTagName("error");
+        if (errors.getLength() == 0) {
+            errors = testcase.getElementsByTagName("failure");
+        }
+        if (errors.getLength() == 0) {
+            return null;
+        }
+        Element e = (Element) errors.item(0);
+        String type = e.getAttribute("type");
+        String message = e.getAttribute("message");
+        String stack = e.getTextContent();
+        String combined = (type.isBlank() ? "" : type + ": ")
+                + (message.isBlank() ? "" : message + "\n")
+                + (stack == null ? "" : stack);
+        return combined.length() > 8000 ? combined.substring(0, 4000) : combined;
     }
 
     private Plugin resolveSurefirePlugin() {
@@ -594,6 +631,20 @@ public class SurefireExecutor {
         public SurefireResult withTestResults(List<String> executedTestIds, List<String> failedTestIds,
                                               long testTimeMillis) {
             return new SurefireResult(exitCode, elapsedMillis, timedOut, failureDetail,
+                    executedTestIds, failedTestIds, testTimeMillis);
+        }
+
+        /** Appends the parsed test exception chain to the failure detail when
+          * not already present. The mojo's own summary message ("There are test
+          * failures") never carries the nested causes the structural
+          * invalidation matcher needs; the surefire XML does. */
+        public SurefireResult withFailureDetailEnriched(List<String> errorDetails) {
+            String joined = String.join("\n", errorDetails);
+            if (failureDetail != null && failureDetail.contains(joined)) {
+                return this;
+            }
+            String enriched = (failureDetail == null ? "" : failureDetail + "\n") + joined;
+            return new SurefireResult(exitCode, elapsedMillis, timedOut, enriched,
                     executedTestIds, failedTestIds, testTimeMillis);
         }
 

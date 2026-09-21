@@ -524,14 +524,18 @@ class ShimImplSpec extends AnyFunSuite with BeforeAndAfterAll {
     assert(mutantId == GOLDEN_MUTANT_ID)
   }
 
-  test("classify on Window node returns Window with candidates 0 (INVERT_WINDOW_ORDER) and 1 (TRUNCATE_WINDOW_FRAME)") {
+  test("classify on Window node returns Window with candidate 0 (INVERT_WINDOW_ORDER); TRUNCATE is not offered for ranking functions") {
     val winNode = findWindow(windowed())
     val result = shim.classify(winNode, 2, 0)
 
     val (opType, candidates) = result.getOrElse(fail("expected Some for a Window node"))
     assert(opType == OperatorType.Window)
-    assert(candidates.map(_.mutationIndex) == Seq(0, 1))
-    assert(candidates.map(_.description) == Seq("INVERT_WINDOW_ORDER", "TRUNCATE_WINDOW_FRAME"))
+    // row_number() ignores the frame entirely, so TRUNCATE_WINDOW_FRAME would
+    // be a guaranteed no-op — a mutant that applies, changes nothing, and is
+    // reported SURVIVED (a false blind spot). Only INVERT_WINDOW_ORDER is
+    // offered for ranking-function windows.
+    assert(candidates.map(_.mutationIndex) == Seq(0))
+    assert(candidates.map(_.description) == Seq("INVERT_WINDOW_ORDER"))
     assert(candidates.forall(_.operatorType == OperatorType.Window))
 
     val sig = shim.canonicalExprSig(winNode, OperatorType.Window)
@@ -758,7 +762,9 @@ class ShimImplSpec extends AnyFunSuite with BeforeAndAfterAll {
     assert(coordinate.toHex == GOLDEN_WIN_COORDINATE)
 
     val (_, candidates) = shim.classify(winNode, 2, 0).getOrElse(fail("expected Window candidates"))
-    assert(candidates.map(_.mutationIndex) == Seq(0, 1))
+    // row_number() ignores the frame, so TRUNCATE_WINDOW_FRAME (index 1) is
+    // deliberately not offered — see the classify test above.
+    assert(candidates.map(_.mutationIndex) == Seq(0))
     assert(candidates.forall(_.coordinate.toHex == GOLDEN_WIN_COORDINATE))
 
     val mutantId = DeterministicHasher.computeMutantId("test/path", coordinate.toHex, "WINDOW", 0)

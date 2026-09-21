@@ -3,8 +3,8 @@ package io.github.wpunit13.mutator.spark35
 import io.github.wpunit13.mutator.api._
 import org.apache.spark.sql.catalyst.expressions.{
   Alias, And, Ascending, Attribute, AttributeReference, Cast, Coalesce, Descending,
-  Expression, Literal, NamedExpression, Not, SortOrder, SpecifiedWindowFrame,
-  UnaryMinus, UnboundedPreceding, WindowExpression
+  Expression, Literal, NamedExpression, Not, RowFrame, SortOrder, SpecifiedWindowFrame,
+  UnaryMinus, UnboundedPreceding, WindowExpression, WindowSpecDefinition
 }
 import org.apache.spark.sql.catalyst.expressions.aggregate.{AggregateExpression, AggregateFunction, Count, Max, Min, Sum}
 import org.apache.spark.sql.catalyst.plans.{Cross, Inner, JoinType, LeftAnti, LeftOuter}
@@ -81,11 +81,7 @@ abstract class Spark35ShimBase extends PlanMutatorShim {
       if (w.orderSpec.nonEmpty) {
         builder += MutationCandidate(coord, OperatorType.Window, 0, "INVERT_WINDOW_ORDER")
       }
-      val hasUnbounded = w.windowExpressions.exists(_.exists {
-        case f: SpecifiedWindowFrame => f.lower == UnboundedPreceding
-        case _                       => false
-      })
-      if (hasUnbounded) {
+      if (hasTruncatableFrame(w)) {
         builder += MutationCandidate(coord, OperatorType.Window, 1, "TRUNCATE_WINDOW_FRAME")
       }
       val candidates = builder.result()
@@ -122,6 +118,36 @@ abstract class Spark35ShimBase extends PlanMutatorShim {
     case _: And => true
     case _      => false
   }
+
+  /**
+   * TRUNCATE_WINDOW_FRAME is only offered for frames the executor actually
+   * honors. Two shapes make the truncation a guaranteed no-op — a mutant that
+   * applies, changes nothing, and is reported SURVIVED (a false blind spot):
+   *   - ranking window functions (row_number, rank, dense_rank, ntile, ...)
+   *     ignore the frame entirely — only aggregate window functions are
+   *     frame-sensitive;
+   *   - a RangeFrame offset with an empty ORDER BY: every row in the
+   *     partition is a peer, so any offset bound selects the same peer group
+   *     as the unbounded bound it replaced.
+   */
+  private def hasTruncatableFrame(w: Window): Boolean =
+    w.windowExpressions.exists { ne =>
+      ne.exists {
+        case we @ WindowExpression(_, _) =>
+          we.windowSpec.frameSpecification match {
+            case f: SpecifiedWindowFrame =>
+              f.lower == UnboundedPreceding && isFrameSensitive(we.windowFunction) &&
+                (f.frameType == RowFrame || w.orderSpec.nonEmpty)
+            case _ => false
+          }
+        case _ => false
+      }
+    }
+
+  /** Only aggregate window functions honor the frame; ranking functions
+    * (row_number, rank, dense_rank, ntile, ...) ignore it entirely. */
+  private def isFrameSensitive(fn: Expression): Boolean =
+    fn.exists { case _: AggregateExpression => true; case _ => false }
 
   /** Report-facing short form. INNER/LEFT/CROSS/ANTI match the original static
     * descriptions byte-for-byte; anything else falls back to JoinType.sql. */

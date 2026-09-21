@@ -67,6 +67,32 @@ public final class MutationCatalogAccess {
         InMemoryMutationCatalog.getInstance().clearForTesting();
     }
 
+    /** Marks the mutation loop as running; discovery/observation freeze. */
+    public static void markMutationLoopStarted() {
+        InMemoryMutationCatalog.getInstance().markMutationLoopStarted();
+    }
+
+    /** True once a mutant has been activated in this JVM (see the singleton). */
+    public static boolean isMutationLoopStarted() {
+        return InMemoryMutationCatalog.getInstance().isMutationLoopStarted();
+    }
+
+    /**
+     * Resets the catalog (entries, site hints, optimizer observations) for a
+     * fresh discovery run. Called by the JUnit 5 bridge at each annotated
+     * class's baseline start in in-process standalone mode, so a class's
+     * mutation loop only sees the mutants discovered from its own plans —
+     * the JVM-wide singleton would otherwise leak earlier classes' mutants
+     * into this class's loop (cross-class contamination: mutants from other
+     * classes' plans get forked against this class's queries, where they
+     * either never apply or — worse — match a same-shaped node and corrupt
+     * attribution). Fork mode must NOT call this: its baseline fork runs the
+     * whole suite and must accumulate every class's mutants.
+     */
+    public static void resetForDiscovery() {
+        InMemoryMutationCatalog.getInstance().clearForTesting();
+    }
+
     /**
      * Seeds the in-memory catalog from externally-supplied metadata — the
      * fork-side half of the cross-process catalog handoff (see

@@ -10,6 +10,8 @@ import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.catalyst.trees.TreeNodeTag
 import org.slf4j.LoggerFactory
 
+import scala.jdk.CollectionConverters._
+
 import java.io.IOException
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
@@ -88,13 +90,17 @@ class CatalystMutationRule(shim: PlanMutatorShim, phase: CatalystMutationRule.Ph
     if (activeMutantId == null) {
       phase match {
         case CatalystMutationRule.PostHoc   => discovery(plan)
-        case CatalystMutationRule.Optimizer => plan
+        case CatalystMutationRule.Optimizer => observeOptimizedPlan(plan)
       }
     } else {
-      phase match {
+      val result = phase match {
         case CatalystMutationRule.PostHoc   => matchAndRecord(plan, activeMutantId)
         case CatalystMutationRule.Optimizer => rewriteMatched(plan, activeMutantId)
       }
+      // Any activation freezes discovery/observation for the rest of the
+      // JVM's life (reset only with the catalog, at the next baseline).
+      MutationCatalogAccess.markMutationLoopStarted()
+      result
     }
   }
 
@@ -117,6 +123,11 @@ class CatalystMutationRule(shim: PlanMutatorShim, phase: CatalystMutationRule.Ph
    *    failure mode in disguise.
    */
   private def discovery(plan: LogicalPlan): LogicalPlan = {
+    if (MutationCatalogAccess.isMutationLoopStarted() && !java.lang.Boolean.getBoolean("spark.mutator.freeze.disabled")) {
+      // Transient IDLE window inside a mutant re-run (the harness clears the
+      // active mutant between test methods): never discover from mutated plans.
+      return plan
+    }
     val policy = MutationPolicy.fromSystemProperties()
     CatalystMutationRule.warnUnrecognizedExclusionsOnce(policy.unrecognizedExclusions)
     val hint = CatalystMutationRule.currentFilePathHint
@@ -135,6 +146,13 @@ class CatalystMutationRule(shim: PlanMutatorShim, phase: CatalystMutationRule.Ph
           excludedSkips += 1
         } else if (targetAllowed) {
           val operatorTag = NodeCoordinateFactory.operatorTypeTag(operatorType)
+          // Viability hint: the node's execution-time identity. Candidates
+          // whose site never reaches an optimizer batch (pushed into scans,
+          // collapsed by later rules) could only ever report NOT_APPLIED —
+          // the catalog's viability filter drops them at write time.
+          val nodeClass = node.getClass.getSimpleName
+          val referencedColumns = node.expressions.flatMap(_.references).map(_.name).toSet.asJava
+          val exprClasses = node.expressions.flatMap(_.collect { case e => e.getClass.getSimpleName }).toSet.asJava
           candidates.foreach { candidate =>
             val coordinateHex = candidate.coordinate.toHex
             val mutantId = DeterministicHasher.computeMutantId(
@@ -152,6 +170,7 @@ class CatalystMutationRule(shim: PlanMutatorShim, phase: CatalystMutationRule.Ph
               candidate.description,
               coordinateHex,
               mutantId)
+            MutationCatalogAccess.sink().recordSiteHint(mutantId, nodeClass, referencedColumns, exprClasses)
           }
         }
       }
@@ -167,6 +186,36 @@ class CatalystMutationRule(shim: PlanMutatorShim, phase: CatalystMutationRule.Ph
           policy.excludedOperators.mkString("{", ", ", "}") +
           " (spark.mutator.excludedMutators)")
     }
+    plan
+  }
+
+  /**
+   * Branch A2 — Discovery mode (registry IDLE, Optimizer phase). Records
+   * which nodes reach optimizer batches and which mutation indexes their
+   * classification offers. The catalog's viability filter matches
+   * discovery-time site hints against these observations: a candidate whose
+   * site never appears here can never be matched by the Optimizer-phase
+   * rule (exact shape-free key or identity fallback) and would only ever
+   * report NOT_APPLIED. The plan is returned unchanged.
+   */
+  private def observeOptimizedPlan(plan: LogicalPlan): LogicalPlan = {
+    if (MutationCatalogAccess.isMutationLoopStarted() && !java.lang.Boolean.getBoolean("spark.mutator.freeze.disabled")) {
+      // Transient IDLE window inside a mutant re-run: never observe mutated plans.
+      return plan
+    }
+    def walk(node: LogicalPlan): Unit = {
+      shim.classify(node, 0, -1).foreach { case (_, candidates) =>
+        val nullGuardOnly = node.expressions.nonEmpty &&
+          node.expressions.forall(_.getClass.getSimpleName == "IsNotNull")
+        MutationCatalogAccess.sink().recordOptimizerObservation(
+          node.getClass.getSimpleName,
+          node.schema.fieldNames.toSet.asJava,
+          candidates.map(c => Integer.valueOf(c.mutationIndex)).toSet.asJava,
+          nullGuardOnly)
+      }
+      node.children.foreach(walk)
+    }
+    walk(plan)
     plan
   }
 

@@ -5,6 +5,7 @@ import io.github.wpunit13.mutator.catalog.MutationCatalogIo;
 import io.github.wpunit13.mutator.model.MutantMetadata;
 import io.github.wpunit13.mutator.model.MutantResult;
 import io.github.wpunit13.mutator.model.MutantStatus;
+import io.github.wpunit13.mutator.model.StructuralInvalidation;
 import io.github.wpunit13.mutator.report.AppliedMarkerStore;
 import io.github.wpunit13.mutator.report.DiffSnippetStore;
 import io.github.wpunit13.mutator.report.FailingTests;
@@ -15,14 +16,17 @@ import org.apache.maven.plugin.MojoFailureException;
 
 import java.io.File;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.function.Consumer;
+import java.util.stream.Stream;
 
 /**
  * Coordinates the full mutation testing lifecycle across the Maven fork boundary:
@@ -183,6 +187,7 @@ public class MutationLoopCoordinator {
      */
     public long runBaseline() throws MojoFailureException, MojoExecutionException {
         ensureOutputDirectory();
+        clearStaleAppliedMarkers();
 
         // 1. Baseline: run unmutated. The baseline fork performs discovery and
         //    writes catalog.json into the shared output directory.
@@ -359,6 +364,47 @@ public class MutationLoopCoordinator {
             Files.createDirectories(outputDirectory);
         } catch (IOException e) {
             throw new MojoExecutionException("Could not create output directory " + outputDirectory, e);
+        }
+    }
+
+    /**
+     * Deletes {@code applied/} markers left by any previous run sharing this
+     * output directory (an interrupted run, a differently-scoped run, a prior
+     * in-process {@code mvn test}). The marker is only meaningful within one
+     * run: a stale marker makes {@link #classify} skip the NOT_APPLIED branch
+     * and record a fork that never executed the mutation as KILLED — a
+     * fabricated kill that inflates the mutation score. Runs here, in the one
+     * place that precedes every fork in every mode (single loop, orchestrated
+     * workers, CI matrix), so concurrent shard children never delete each
+     * other's markers. {@code skipBaseline=true} reruns deliberately do not
+     * clean: they share the directory with sibling workers.
+     */
+    private void clearStaleAppliedMarkers() throws MojoExecutionException {
+        Path appliedDir = AppliedMarkerStore.appliedDir(outputDirectory);
+        if (!Files.exists(appliedDir)) {
+            return;
+        }
+        long removed;
+        try (Stream<Path> walk = Files.walk(appliedDir)) {
+            removed = walk.filter(Files::isRegularFile).count();
+        } catch (IOException e) {
+            throw new MojoExecutionException("Could not scan " + appliedDir, e);
+        }
+        try (Stream<Path> walk = Files.walk(appliedDir)) {
+            walk.sorted(Comparator.reverseOrder()).forEach(p -> {
+                try {
+                    Files.delete(p);
+                } catch (IOException e) {
+                    throw new UncheckedIOException(e);
+                }
+            });
+        } catch (IOException | UncheckedIOException e) {
+            throw new MojoExecutionException(
+                    "Could not clear stale applied markers in " + appliedDir
+                            + " (stale markers would misclassify not-applied forks as KILLED)", e);
+        }
+        if (removed > 0) {
+            timingLog.accept("cleared " + removed + " stale applied marker(s) from " + appliedDir);
         }
     }
 
@@ -547,7 +593,18 @@ public class MutationLoopCoordinator {
         if (r.getExitCode() == 2) {
             // SurefireExecutor maps a non-MojoFailure exception to exit code 2:
             // the plugin could not run the suite, which is an ERRORED, not a KILLED.
-            return new MutantResult(mutantId, MutantStatus.ERRORED, elapsed, r.getFailureDetail(), now);
+            // Exception: the mutation WAS applied and the failure is a plan
+            // binding/resolution error — the mutated node stopped producing a
+            // column the rest of the plan references (e.g. INNER→ANTI with
+            // downstream right-side references). The optimizer had its chance
+            // to repair and could not: structurally invalid for this query,
+            // a designed skip, not an engine/harness failure.
+            String detail = r.getFailureDetail();
+            if (detail != null && StructuralInvalidation.matches(detail)) {
+                return new MutantResult(mutantId, MutantStatus.SKIPPED, elapsed,
+                        "mutation structurally invalidated the plan: " + detail, now);
+            }
+            return new MutantResult(mutantId, MutantStatus.ERRORED, elapsed, detail, now);
         }
         if (r.isFailure()) {
             String detail = r.getFailureDetail() != null ? r.getFailureDetail() : "Assertion failed in test execution";

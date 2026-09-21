@@ -94,13 +94,17 @@ class CatalystMutationRuleFilteringSpec extends AnyFunSuite with BeforeAndAfterA
   // ---------------------------------------------------------------------------
 
   test("excludedMutators keeps excluded operators out of the catalog (case-insensitive)") {
-    System.setProperty(CatalystMutationRule.MutationPolicy.ExcludedMutatorsProp, "join")
+    System.setProperty(CatalystMutationRule.MutationPolicy.ExcludedMutatorsProp, "filter")
 
     buildJoinQuery().where("lval > 1").queryExecution.optimizedPlan
 
-    assert(entriesOf(OperatorTypeDto.JOIN).isEmpty,
-      "no JOIN candidate may be catalogued while JOIN is excluded")
-    assert(entriesOf(OperatorTypeDto.FILTER).nonEmpty,
+    assert(entriesOf(OperatorTypeDto.FILTER).isEmpty,
+      "no FILTER candidate may be catalogued while FILTER is excluded")
+    // Viability note: the where() predicate is pushed into the range scan, so
+    // a surviving Filter would be dropped by the viability filter anyway; the
+    // JOIN is the operator that survives optimization here, and it must still
+    // be catalogued while unexcluded.
+    assert(entriesOf(OperatorTypeDto.JOIN).nonEmpty,
       "non-excluded operators must still be catalogued")
   }
 

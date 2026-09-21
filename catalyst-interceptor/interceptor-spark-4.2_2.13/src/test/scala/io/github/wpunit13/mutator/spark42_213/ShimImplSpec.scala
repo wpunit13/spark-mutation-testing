@@ -254,7 +254,10 @@ class ShimImplSpec extends AnyFunSuite with BeforeAndAfterAll {
     assert(coordinate.toHex == GOLDEN_WIN_COORDINATE)
 
     val (_, candidates) = shim.classify(winNode, 2, 0).getOrElse(fail("expected Window candidates"))
-    assert(candidates.map(_.mutationIndex) == Seq(0, 1))
+    // row_number() ignores the frame, so TRUNCATE_WINDOW_FRAME (index 1) is
+    // deliberately not offered — a frame mutation on a ranking function is a
+    // guaranteed no-op that would report a false SURVIVED.
+    assert(candidates.map(_.mutationIndex) == Seq(0))
     assert(candidates.forall(_.coordinate.toHex == GOLDEN_WIN_COORDINATE))
 
     val mutantId = DeterministicHasher.computeMutantId("test/path", coordinate.toHex, "WINDOW", 0)

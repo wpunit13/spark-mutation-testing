@@ -7,6 +7,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -21,11 +22,36 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 final class InMemoryMutationCatalog implements MutationCatalogSink {
 
+    /** Discovery-time identity of a candidate's plan node (see the sink javadoc). */
+    private record SiteHint(String nodeClass, Set<String> referencedColumns, Set<String> exprClasses) {
+    }
+
+    /** One optimizer-phase observation of a live node (see the sink javadoc). */
+    private record OptimizerObservation(
+            String nodeClass, Set<String> schemaFieldNames, Set<Integer> offeredMutationIndexes,
+            boolean insertedNullGuardOnly) {
+    }
+
     private static final class Holder {
         static final InMemoryMutationCatalog INSTANCE = new InMemoryMutationCatalog();
     }
 
     private final Map<String, MutantMetadata> catalog = new ConcurrentHashMap<>();
+    private final Map<String, SiteHint> siteHints = new ConcurrentHashMap<>();
+    private final Set<OptimizerObservation> optimizerObservations = ConcurrentHashMap.newKeySet();
+
+    /**
+     * Set once the first mutant activation is observed in this JVM. The
+     * harness clears the active mutant between test methods, so the Catalyst
+     * rule sees transient IDLE windows during mutant re-runs; discovery and
+     * optimizer observation must not fire there — they would catalogue and
+     * observe nodes from MUTATED plans, polluting the viability filter's
+     * observation set (a mutated plan's Filter would make phantom filter
+     * hints look viable). Reset only with the catalog (resetForDiscovery).
+     */
+    private volatile boolean mutationLoopStarted = false;
+
+    private volatile int lastLoggedDropCount = -1;
 
     private InMemoryMutationCatalog() {
     }
@@ -82,9 +108,81 @@ final class InMemoryMutationCatalog implements MutationCatalogSink {
         });
     }
 
+    @Override
+    public void recordSiteHint(String mutantId, String nodeClass,
+                               Set<String> referencedColumns, Set<String> exprClasses) {
+        siteHints.putIfAbsent(mutantId, new SiteHint(
+                nodeClass, Set.copyOf(referencedColumns), Set.copyOf(exprClasses)));
+    }
+
+    @Override
+    public void recordOptimizerObservation(
+            String nodeClass, Set<String> schemaFieldNames,
+            Set<Integer> offeredMutationIndexes, boolean insertedNullGuardOnly) {
+        optimizerObservations.add(new OptimizerObservation(
+                nodeClass, Set.copyOf(schemaFieldNames), Set.copyOf(offeredMutationIndexes),
+                insertedNullGuardOnly));
+    }
+
+    /** Marks the mutation loop as running; discovery/observation freeze. */
+    void markMutationLoopStarted() {
+        mutationLoopStarted = true;
+    }
+
+    boolean isMutationLoopStarted() {
+        return mutationLoopStarted;
+    }
+
     /** Returns an unmodifiable snapshot of every catalogued mutant. */
     Collection<MutantMetadata> allEntries() {
-        return List.copyOf(catalog.values());
+        List<MutantMetadata> entries = List.copyOf(catalog.values());
+        if (Boolean.getBoolean("spark.mutator.viabilityFilter.disabled")
+                || siteHints.isEmpty() || optimizerObservations.isEmpty()) {
+            return entries;
+        }
+        List<MutantMetadata> viable = new ArrayList<>(entries.size());
+        int dropped = 0;
+        for (MutantMetadata entry : entries) {
+            if (isViable(entry)) {
+                viable.add(entry);
+            } else {
+                dropped++;
+            }
+        }
+        if (dropped > 0 && dropped != lastLoggedDropCount) {
+            lastLoggedDropCount = dropped;
+            System.out.println("[spark-mutator] viability filter dropped " + dropped
+                    + " of " + entries.size() + " discovered mutant(s): their plan sites are "
+                    + "absent from every optimized plan (pushed into scans / collapsed by "
+                    + "the optimizer) and could only ever report NOT_APPLIED");
+        }
+        return List.copyOf(viable);
+    }
+
+    /**
+     * Viability = the Optimizer-phase matcher could find at least one node:
+     * some observed node of the hint's class satisfies the identity
+     * fallback's exact criteria (schema carries at least one referenced
+     * column; not a pure inserted-null-guard the fallback refuses) and
+     * offers the candidate's mutation index. Entries without a hint (loaded
+     * from catalog.json in mutant forks, or registered outside discovery)
+     * are always kept.
+     */
+    private boolean isViable(MutantMetadata entry) {
+        SiteHint hint = siteHints.get(entry.getMutantId());
+        if (hint == null) {
+            return true;
+        }
+        for (OptimizerObservation obs : optimizerObservations) {
+            if (obs.nodeClass().equals(hint.nodeClass())
+                    && obs.offeredMutationIndexes().contains(entry.getMutationIndex())
+                    && !obs.insertedNullGuardOnly()
+                    && (hint.referencedColumns().isEmpty()
+                        || hint.referencedColumns().stream().anyMatch(obs.schemaFieldNames()::contains))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -139,5 +237,9 @@ final class InMemoryMutationCatalog implements MutationCatalogSink {
      */
     void clearForTesting() {
         catalog.clear();
+        siteHints.clear();
+        optimizerObservations.clear();
+        mutationLoopStarted = false;
+        lastLoggedDropCount = -1;
     }
 }
