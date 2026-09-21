@@ -1,10 +1,19 @@
 name: CI
 
+# Trigger policy: PR runs are the gate (incl. the version-hygiene merge guard
+# and the shim matrix); the post-merge main run verifies what actually landed
+# ("green main" for releases). Bare branch pushes trigger NOTHING — want CI
+# on a branch? Open the PR (draft if not ready).
 on:
   push:
-    branches: ["**"]
+    branches: [main]
   pull_request:
     branches: ["**"]
+
+# Rapid PR updates cancel the superseded in-progress run for the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   # WP-20: global checks run ONCE — they are version-independent (the
