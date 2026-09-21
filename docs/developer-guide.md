@@ -31,8 +31,9 @@ does four things on `mvn spark-mutation-testing:mutate`:
 
 1. **Detect** the Spark/Scala version from the project's **test** classpath
    (`SparkVersionDetector`).
-2. **Resolve** the matching `interceptor-spark-<major.minor>_<scala>` bundle via
-   Maven Resolver/Aether.
+2. **Resolve** the matching `interceptor-bundle-spark-<combo>` bundle via
+   Maven Resolver/Aether (the shaded fat jar — the only interceptor artifact
+   published to Central; the thin `interceptor-spark-*` shims are internal).
 3. **Configure** Surefire: append
    `-Dspark.sql.extensions=io.github.wpunit13.mutator.MutatorSparkExtension` to
    `argLine` and add the interceptor JAR to `additionalClasspathElements`

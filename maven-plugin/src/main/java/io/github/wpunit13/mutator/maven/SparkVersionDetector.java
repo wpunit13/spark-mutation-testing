@@ -111,7 +111,11 @@ public class SparkVersionDetector {
                             + "Supported versions: " + new TreeSet<>(SUPPORTED_VERSIONS));
         }
 
-        String interceptorArtifactId = "interceptor-spark-" + key;
+        // Resolve the PUBLISHED bundle (shaded fat jar), not the thin shim —
+        // WP-22 excludes the thin shims from Central; only the bundles are on
+        // the public surface. Resolving the thin shim made the released
+        // plugin's `mutate` goal fail on consumer machines (v1.0.0 defect).
+        String interceptorArtifactId = "interceptor-bundle-spark-" + key;
 
         return new InterceptorCoordinate(
                 DEFAULT_GROUP_ID,
