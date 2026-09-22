@@ -220,6 +220,11 @@ jobs:
          inputs.jobs == 'smoke-only')
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout repository (verify-release.sh lives in the tagged commit)
+        uses: actions/checkout@v4
+        with:
+          ref: refs/tags/v${{ needs.guard.outputs.version }}
+
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
@@ -251,20 +256,22 @@ jobs:
           print("bundled jars:", jars)
           PY
 
-      - name: Resolve plugin + bundle from Maven Central
+      # The FULL consumer-facing coordinate set, not just two spot checks:
+      # the 1.0.0 release published a subset of the modules and the plugin
+      # resolved a coordinate that was never published — every downstream
+      # consumer's CI-grade path died while this smoke test stayed green on
+      # its two-artifact spot check.
+      - name: Resolve the full release coordinate set from Maven Central
         env:
           VERSION: ${{ needs.guard.outputs.version }}
         run: |
           for _ in $(seq 1 30); do
-            if mvn -B -q dependency:get \
-                 -Dartifact="io.github.wpunit13:spark-mutation-testing-maven-plugin:$VERSION" \
-              && mvn -B -q dependency:get \
-                 -Dartifact="io.github.wpunit13:interceptor-bundle-spark-3.5_2.13:$VERSION"; then
+            if bash scripts/verify-release.sh "$VERSION"; then
               echo "Central resolution OK"
               exit 0
             fi
             echo "Not on Central yet (attempt $_/30) — waiting 60s..."
             sleep 60
           done
-          echo "ERROR: artifacts not resolvable from Central after 30 minutes" >&2
+          echo "ERROR: release coordinates not resolvable from Central after 30 minutes" >&2
           exit 1
