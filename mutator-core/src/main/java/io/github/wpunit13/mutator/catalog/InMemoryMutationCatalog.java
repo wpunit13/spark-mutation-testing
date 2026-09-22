@@ -23,13 +23,14 @@ import java.util.concurrent.ConcurrentHashMap;
 final class InMemoryMutationCatalog implements MutationCatalogSink {
 
     /** Discovery-time identity of a candidate's plan node (see the sink javadoc). */
-    private record SiteHint(String nodeClass, Set<String> referencedColumns, Set<String> exprClasses) {
+    private record SiteHint(String nodeClass, Set<String> referencedColumns,
+                            Set<String> exprClasses, Set<String> exprSigSet) {
     }
 
     /** One optimizer-phase observation of a live node (see the sink javadoc). */
     private record OptimizerObservation(
             String nodeClass, Set<String> schemaFieldNames, Set<Integer> offeredMutationIndexes,
-            boolean insertedNullGuardOnly) {
+            boolean insertedNullGuardOnly, Set<String> exprSigSet) {
     }
 
     private static final class Holder {
@@ -110,18 +111,21 @@ final class InMemoryMutationCatalog implements MutationCatalogSink {
 
     @Override
     public void recordSiteHint(String mutantId, String nodeClass,
-                               Set<String> referencedColumns, Set<String> exprClasses) {
+                               Set<String> referencedColumns, Set<String> exprClasses,
+                               Set<String> exprSigSet) {
         siteHints.putIfAbsent(mutantId, new SiteHint(
-                nodeClass, Set.copyOf(referencedColumns), Set.copyOf(exprClasses)));
+                nodeClass, Set.copyOf(referencedColumns), Set.copyOf(exprClasses),
+                Set.copyOf(exprSigSet)));
     }
 
     @Override
     public void recordOptimizerObservation(
             String nodeClass, Set<String> schemaFieldNames,
-            Set<Integer> offeredMutationIndexes, boolean insertedNullGuardOnly) {
+            Set<Integer> offeredMutationIndexes, boolean insertedNullGuardOnly,
+            Set<String> exprSigSet) {
         optimizerObservations.add(new OptimizerObservation(
                 nodeClass, Set.copyOf(schemaFieldNames), Set.copyOf(offeredMutationIndexes),
-                insertedNullGuardOnly));
+                insertedNullGuardOnly, Set.copyOf(exprSigSet)));
     }
 
     /** Marks the mutation loop as running; discovery/observation freeze. */
@@ -161,12 +165,16 @@ final class InMemoryMutationCatalog implements MutationCatalogSink {
 
     /**
      * Viability = the Optimizer-phase matcher could find at least one node:
-     * some observed node of the hint's class satisfies the identity
-     * fallback's exact criteria (schema carries at least one referenced
-     * column; not a pure inserted-null-guard the fallback refuses) and
-     * offers the candidate's mutation index. Entries without a hint (loaded
-     * from catalog.json in mutant forks, or registered outside discovery)
-     * are always kept.
+     * some observed node of the hint's class offers the candidate's mutation
+     * index, is not a pure inserted-null-guard (the fallback refuses those),
+     * and — the site-identity check — whose expression fingerprint set
+     * INTERSECTS the hint's. The optimizer can only remove expressions
+     * (pruning, conversion) or add condition conjuncts (pushdown), so a
+     * surviving site's set always intersects; a different site built over a
+     * differently-typed source (e.g. an implicit CAST for a JSON-inferred
+     * BIGINT vs an INT LocalRelation) produces a disjoint set and is dropped.
+     * Entries without a hint (loaded from catalog.json in mutant forks, or
+     * registered outside discovery) are always kept.
      */
     private boolean isViable(MutantMetadata entry) {
         SiteHint hint = siteHints.get(entry.getMutantId());
@@ -177,8 +185,8 @@ final class InMemoryMutationCatalog implements MutationCatalogSink {
             if (obs.nodeClass().equals(hint.nodeClass())
                     && obs.offeredMutationIndexes().contains(entry.getMutationIndex())
                     && !obs.insertedNullGuardOnly()
-                    && (hint.referencedColumns().isEmpty()
-                        || hint.referencedColumns().stream().anyMatch(obs.schemaFieldNames()::contains))) {
+                    && !obs.exprSigSet().isEmpty()
+                    && obs.exprSigSet().stream().anyMatch(hint.exprSigSet()::contains)) {
                 return true;
             }
         }

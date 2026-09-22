@@ -52,4 +52,21 @@ trait PlanMutatorShim {
    * logical query.
    */
   def canonicalExprSig(node: LogicalPlan, operatorType: OperatorType): String
+
+  /**
+   * The set of expression fingerprints that make up this node's site:
+   * per-conjunct sigs for Filter/Join conditions, per-expression sigs for
+   * Aggregate/Window/Project. The optimizer can only REMOVE expressions
+   * (pruning, conversion) or ADD condition conjuncts (pushdown), so a
+   * surviving site's set always INTERSECTS the discovery-time set — while a
+   * different site built over a differently-typed source (e.g. an implicit
+   * CAST inserted for a JSON-inferred BIGINT vs an INT LocalRelation)
+   * produces a disjoint set. Site-identity checks (viability filtering,
+   * identity fallback) use this intersection to tell "the same site,
+   * reshaped" from "a different site that merely looks similar".
+   *
+   * Default: empty set (test fakes). Both real shim implementations override
+   * this; the cross-version golden guard exercises the override.
+   */
+  def exprSigSet(node: LogicalPlan, operatorType: OperatorType): Set[String] = Set.empty
 }

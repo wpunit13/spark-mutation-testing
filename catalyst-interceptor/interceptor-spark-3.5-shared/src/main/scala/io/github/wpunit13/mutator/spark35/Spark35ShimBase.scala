@@ -3,8 +3,9 @@ package io.github.wpunit13.mutator.spark35
 import io.github.wpunit13.mutator.api._
 import org.apache.spark.sql.catalyst.expressions.{
   Alias, And, Ascending, Attribute, AttributeReference, Cast, Coalesce, Descending,
-  Expression, Literal, NamedExpression, Not, RowFrame, SortOrder, SpecifiedWindowFrame,
-  UnaryMinus, UnboundedPreceding, WindowExpression, WindowSpecDefinition
+  Expression, IsNotNull, Literal, NamedExpression, Not, RowFrame, SortOrder,
+  SpecifiedWindowFrame, UnaryMinus, UnboundedPreceding, WindowExpression,
+  WindowSpecDefinition
 }
 import org.apache.spark.sql.catalyst.expressions.aggregate.{AggregateExpression, AggregateFunction, Count, Max, Min, Sum}
 import org.apache.spark.sql.catalyst.plans.{Cross, Inner, JoinType, LeftAnti, LeftOuter}
@@ -373,31 +374,36 @@ abstract class Spark35ShimBase extends PlanMutatorShim {
       case _           => false
     }
 
-  override def canonicalExprSig(node: LogicalPlan, operatorType: OperatorType): String =
+  override def canonicalExprSig(node: LogicalPlan, operatorType: OperatorType): String = {
+    val ordinals = fingerprintOrdinals(node, operatorType)
     (node, operatorType) match {
       case (j: Join, OperatorType.Join) =>
-        val conditionSig = j.condition.map(substituteExprIds(j, _)).getOrElse("")
+        val conditionSig = j.condition
+          .map(normalizeCondition)
+          .map(substituteAttrTokens(_, ordinals))
+          .getOrElse("")
         Seq(j.joinType.sql, conditionSig).mkString(";")
 
       case (f: Filter, OperatorType.Filter) =>
-        Seq(substituteExprIds(f, f.condition)).mkString(";")
+        Seq(substituteAttrTokens(normalizeCondition(f.condition), ordinals)).mkString(";")
 
       case (a: Aggregate, OperatorType.Aggregate) =>
-        val aggSig = a.aggregateExpressions.map(substituteExprIds(a, _))
-        val groupingSig = a.groupingExpressions.map(substituteExprIds(a, _))
+        val aggSig = a.aggregateExpressions.map(substituteAttrTokens(_, ordinals))
+        val groupingSig = a.groupingExpressions.map(substituteAttrTokens(_, ordinals))
         (aggSig ++ groupingSig).mkString(";")
 
       case (w: Window, OperatorType.Window) =>
-        val winSig = w.windowExpressions.map(substituteExprIds(w, _))
-        val partSig = w.partitionSpec.map(substituteExprIds(w, _))
-        val orderSig = w.orderSpec.map(substituteExprIds(w, _))
+        val winSig = w.windowExpressions.map(substituteAttrTokens(_, ordinals))
+        val partSig = w.partitionSpec.map(substituteAttrTokens(_, ordinals))
+        val orderSig = w.orderSpec.map(substituteAttrTokens(_, ordinals))
         (winSig ++ partSig ++ orderSig).mkString(";")
 
       case (p: Project, OperatorType.Project) =>
-        p.projectList.map(substituteExprIds(p, _)).mkString(";")
+        p.projectList.map(substituteAttrTokens(_, ordinals)).mkString(";")
 
       case _ => ""
     }
+  }
 
   private def isMatchingGrouping(namedExpr: NamedExpression, groupingExpr: Expression): Boolean = {
     namedExpr.semanticEquals(groupingExpr) ||
@@ -464,10 +470,109 @@ abstract class Spark35ShimBase extends PlanMutatorShim {
    * Replacements run longest-token-first so a token that is a prefix of
    * another (e.g. "A.id" vs "A.id2") can never corrupt the longer one.
    */
-  private def substituteExprIds(node: LogicalPlan, expr: Expression): String = {
-    val ordinals: Map[Long, Int] =
-      node.output.zipWithIndex.map { case (a, i) => a.exprId.id -> i }.toMap
+  /** The expression sequence the fingerprint renders, NORMALIZED (Filter and
+    * Join conditions lose optimizer-inserted IsNotNull conjuncts and are
+    * canonically ordered). Ordinals are assigned by first appearance across
+    * this sequence — a property of the expression content alone, so column
+    * pruning and pushdown cannot shift them between discovery and matching. */
+  private def fingerprintOrdinals(node: LogicalPlan, operatorType: OperatorType): Map[Long, Int] = {
+    val exprs: collection.Seq[Expression] = (node, operatorType) match {
+      case (j: Join, OperatorType.Join)           => j.condition.toSeq.map(normalizeCondition)
+      case (f: Filter, OperatorType.Filter)       => Seq(normalizeCondition(f.condition))
+      case (a: Aggregate, OperatorType.Aggregate) => a.aggregateExpressions ++ a.groupingExpressions
+      case (w: Window, OperatorType.Window)       => w.windowExpressions ++ w.partitionSpec ++ w.orderSpec
+      case (p: Project, OperatorType.Project)     => p.projectList
+      case _                                      => Seq.empty
+    }
+    exprs
+      .flatMap(_.collect { case a: AttributeReference => a })
+      .distinct
+      .zipWithIndex
+      .map { case (a, i) => a.exprId.id -> i }
+      .toMap
+  }
 
+  /** Optimizer-inserted null guards (isnotnull(col)) are fingerprint noise:
+    * pushdown prepends them to analyzed conditions, so the same site's
+    * condition text differs between discovery and matching. Literal casts
+    * (CAST(100 AS BIGINT), inserted by the analyzer to align types across
+    * differently-typed sources) are folded away by SimplifyCasts at
+    * optimization — same drift. Strip both: top-level IsNotNull conjuncts
+    * (kept untouched when every conjunct is a guard — a pure null-guard
+    * filter is a real site) and literal-cast wrappers, then canonically
+    * order the remaining conjuncts. */
+  private def normalizeCondition(condition: Expression): Expression = {
+    val conjuncts = splitConjuncts(stripLiteralCasts(condition))
+    val kept = conjuncts.filterNot(_.isInstanceOf[IsNotNull])
+    if (kept.isEmpty || kept.length == conjuncts.length) {
+      stripLiteralCasts(condition)
+    } else {
+      kept.sortBy(_.sql).reduce(And)
+    }
+  }
+
+  /** Folds literal casts (CAST(literal AS type) -> literal): the analyzer
+    * inserts them to align types across differently-typed sources, and
+    * SimplifyCasts folds them away at optimization — the same site's
+    * condition text differs between discovery and matching otherwise. */
+  private def stripLiteralCasts(e: Expression): Expression =
+    e.transform { case c: Cast if c.child.isInstanceOf[Literal] => c.child }
+
+  private def splitConjuncts(e: Expression): Seq[Expression] = e match {
+    case And(left, right) => splitConjuncts(left) ++ splitConjuncts(right)
+    case other            => Seq(other)
+  }
+
+  /** The set of expression fingerprints that make up this node's site:
+    * per-conjunct sigs for Filter/Join conditions, per-expression sigs for
+    * Aggregate/Window/Project. The optimizer can only REMOVE expressions
+    * (pruning, conversion) or ADD condition conjuncts (pushdown), so a
+    * surviving site's set always INTERSECTS the discovery-time set — while a
+    * different site built over a differently-typed source (e.g. an implicit
+    * CAST inserted for a JSON-inferred BIGINT vs an INT LocalRelation)
+    * produces a disjoint set. The viability filter and the identity fallback
+    * use this intersection to tell "the same site, reshaped" from "a
+    * different site that merely looks similar". */
+   override def exprSigSet(node: LogicalPlan, operatorType: OperatorType): Set[String] = {
+    val exprs: collection.Seq[Expression] = (node, operatorType) match {
+      case (j: Join, OperatorType.Join)           => j.condition.toSeq.map(normalizeCondition)
+      case (f: Filter, OperatorType.Filter)       => Seq(normalizeCondition(f.condition))
+      case (a: Aggregate, OperatorType.Aggregate) => a.aggregateExpressions ++ a.groupingExpressions
+      case (w: Window, OperatorType.Window)       => w.windowExpressions ++ w.partitionSpec ++ w.orderSpec
+      case (p: Project, OperatorType.Project)     => p.projectList
+      case _                                      => Seq.empty
+    }
+    val ordinals: Map[Long, Int] = exprs
+      .flatMap(_.collect { case a: AttributeReference => a })
+      .distinct
+      .zipWithIndex
+      .map { case (a, i) => a.exprId.id -> i }
+      .toMap
+    exprs.map(substituteAttrTokens(_, ordinals)).toSet
+  }
+
+  /** Renders `expr` via Catalyst's own `.sql` and rewrites every attribute
+    * reference into a positional placeholder `#<ordinal>`, where the ordinal
+    * is the attribute's first-appearance index across the node's fingerprint
+    * expression sequence (see [[fingerprintOrdinals]]) — NOT its position in
+    * `node.output`. Output positions shift whenever the optimizer prunes or
+    * reshapes the schema; expression-relative ordinals do not, so the same
+    * site's fingerprint survives optimization.
+    *
+    * Note on Spark 3.5.x: AttributeReference.sql renders `qualifier.name` and
+    * carries NO `#<exprId>` suffix, so the §4.3 "replace the #<exprId> suffix"
+    * mechanics degenerate to a no-op here and qualifiers/names would leak into
+    * the signature. The spec's stated intent ("replaces every attribute
+    * reference with a positional placeholder rather than its exprId") is
+    * implemented literally instead: each attribute's whole rendered token is
+    * replaced by `#<ordinal>`. This keeps the exprSig byte-identical across
+    * independent builds (different exprIds, aliases and names) and across
+    * Spark versions.
+    *
+    * Replacements run longest-token-first so a token that is a prefix of
+    * another (e.g. "A.id" vs "A.id2") can never corrupt the longer one.
+    */
+  private def substituteAttrTokens(expr: Expression, ordinals: Map[Long, Int]): String = {
     // `collection.Seq` (not the predef `Seq`) is intentional: `expr.collect`
     // returns `scala.collection.Seq` in Spark 3.5, and the predef `Seq` is
     // `immutable.Seq` under Scala 2.13 but `collection.Seq` under 2.12 — the
@@ -482,9 +587,17 @@ abstract class Spark35ShimBase extends PlanMutatorShim {
       val tokens = attrs.map(a => a -> a.sql).sortBy { case (_, token) => (-token.length, token) }
       var result = rendered
       for ((a, token) <- tokens) {
-        val placeholder = ordinals.get(a.exprId.id).map(o => "#" + o).getOrElse("#x")
-        result = result.replace(token, placeholder)
+        result = result.replace(token, "#" + ordinals(a.exprId.id))
       }
+      // Literal type markers (100L, 1.0D, 100BD) leak the source column's
+      // type into the fingerprint: the analyzer inserts CAST(literal AS type)
+      // for differently-typed sources and SimplifyCasts folds them into
+      // differently-typed literals (100 vs 100L for the same comparison).
+      // Canonicalize to the bare value.
+      result = result
+        .replaceAll("(\\d+)L\\b", "$1")
+        .replaceAll("(\\d+)D\\b", "$1")
+        .replaceAll("(\\d+\\.?\\d*)BD\\b", "$1")
       result
     }
   }

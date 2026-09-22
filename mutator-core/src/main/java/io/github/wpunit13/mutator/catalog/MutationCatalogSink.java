@@ -40,7 +40,8 @@ public interface MutationCatalogSink {
      */
     default void recordSiteHint(String mutantId, String nodeClass,
                                 java.util.Set<String> referencedColumns,
-                                java.util.Set<String> exprClasses) {
+                                java.util.Set<String> exprClasses,
+                                java.util.Set<String> exprSigSet) {
     }
 
     /**
@@ -56,6 +57,6 @@ public interface MutationCatalogSink {
     default void recordOptimizerObservation(
             String nodeClass, java.util.Set<String> schemaFieldNames,
             java.util.Set<Integer> offeredMutationIndexes,
-            boolean insertedNullGuardOnly) {
+            boolean insertedNullGuardOnly, java.util.Set<String> exprSigSet) {
     }
 }

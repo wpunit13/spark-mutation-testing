@@ -153,6 +153,7 @@ class CatalystMutationRule(shim: PlanMutatorShim, phase: CatalystMutationRule.Ph
           val nodeClass = node.getClass.getSimpleName
           val referencedColumns = node.expressions.flatMap(_.references).map(_.name).toSet.asJava
           val exprClasses = node.expressions.flatMap(_.collect { case e => e.getClass.getSimpleName }).toSet.asJava
+          val siteSigSet = shim.exprSigSet(node, operatorType).asJava
           candidates.foreach { candidate =>
             val coordinateHex = candidate.coordinate.toHex
             val mutantId = DeterministicHasher.computeMutantId(
@@ -160,6 +161,11 @@ class CatalystMutationRule(shim: PlanMutatorShim, phase: CatalystMutationRule.Ph
               coordinateHex,
               operatorTag,
               candidate.mutationIndex)
+            // TEMP-DEBUG
+            if (dto == io.github.wpunit13.mutator.model.OperatorTypeDto.FILTER) {
+              println("[spark-mutator-disc] " + candidate.coordinate.toHex + " idx=" + candidate.mutationIndex
+                + " sig=" + shim.canonicalExprSig(node, io.github.wpunit13.mutator.api.OperatorType.Filter))
+            }
             // -1 for lineNumber: nothing computes a real source line yet and
             // the model documents -1 as "unknown".
             MutationCatalogAccess.sink().registerCandidate(
@@ -170,7 +176,7 @@ class CatalystMutationRule(shim: PlanMutatorShim, phase: CatalystMutationRule.Ph
               candidate.description,
               coordinateHex,
               mutantId)
-            MutationCatalogAccess.sink().recordSiteHint(mutantId, nodeClass, referencedColumns, exprClasses)
+            MutationCatalogAccess.sink().recordSiteHint(mutantId, nodeClass, referencedColumns, exprClasses, siteSigSet)
           }
         }
       }
@@ -204,14 +210,15 @@ class CatalystMutationRule(shim: PlanMutatorShim, phase: CatalystMutationRule.Ph
       return plan
     }
     def walk(node: LogicalPlan): Unit = {
-      shim.classify(node, 0, -1).foreach { case (_, candidates) =>
+      shim.classify(node, 0, -1).foreach { case (operatorType, candidates) =>
         val nullGuardOnly = node.expressions.nonEmpty &&
           node.expressions.forall(_.getClass.getSimpleName == "IsNotNull")
         MutationCatalogAccess.sink().recordOptimizerObservation(
           node.getClass.getSimpleName,
           node.schema.fieldNames.toSet.asJava,
           candidates.map(c => Integer.valueOf(c.mutationIndex)).toSet.asJava,
-          nullGuardOnly)
+          nullGuardOnly,
+          shim.exprSigSet(node, operatorType).asJava)
       }
       node.children.foreach(walk)
     }
@@ -244,15 +251,17 @@ class CatalystMutationRule(shim: PlanMutatorShim, phase: CatalystMutationRule.Ph
     }
 
     var matched: Option[LogicalPlan] = None
+    var matchedOperatorType: Option[OperatorType] = None
 
     def walk(node: LogicalPlan, depth: Int, childOrdinal: Int): Unit = {
       if (matched.isEmpty) {
-        shim.classify(node, depth, childOrdinal).foreach { case (_, candidates) =>
-          if (candidates.exists { candidate =>
-                candidate.coordinate.toHex == meta.getCoordinateHex &&
-                candidate.mutationIndex == meta.getMutationIndex
-              }) {
+        shim.classify(node, depth, childOrdinal).foreach { case (operatorType, candidates) =>
+          candidates.find { candidate =>
+            candidate.coordinate.toHex == meta.getCoordinateHex &&
+              candidate.mutationIndex == meta.getMutationIndex
+          }.foreach { candidate =>
             matched = Some(node)
+            matchedOperatorType = Some(operatorType)
           }
         }
         if (matched.isEmpty) {
@@ -275,9 +284,10 @@ class CatalystMutationRule(shim: PlanMutatorShim, phase: CatalystMutationRule.Ph
         // Record the node's shape-free key: the coordinate it yields when
         // classified as the plan root. Invariant across the QueryExecution
         // plan clone, optimizer rebuilds, and predicate push-down.
-        shim.classify(node, 0, -1).foreach { case (_, candidates) =>
+        shim.classify(node, 0, -1).foreach { case (operatorType, candidates) =>
           candidates.find(_.mutationIndex == meta.getMutationIndex).foreach { candidate =>
-            recordPendingRewrite(activeMutantId, candidate.coordinate.toHex, node)
+            recordPendingRewrite(activeMutantId, candidate.coordinate.toHex, node,
+              shim.exprSigSet(node, operatorType))
           }
         }
         plan
@@ -376,16 +386,43 @@ class CatalystMutationRule(shim: PlanMutatorShim, phase: CatalystMutationRule.Ph
       // Refusing an ambiguous fallback keeps verdicts load-independent: the
       // honesty guard classifies the run as not-applied, which the mutation
       // score excludes. A miss here still leaves that classification intact.
+      //
+      // The fallback is EPOCH-SCOPED: it may only re-identify the recorded
+      // node within the optimization passes of the analysis that recorded the
+      // pending. In a LATER query a same-class node is a different site —
+      // matching it there made verdicts depend on which query happened to
+      // present a candidate (flaky KILLED vs NOT_APPLIED across runs). The
+      // exact shape-free-key match above is deliberately NOT epoch-scoped:
+      // the key is the site's position-independent identity and legitimately
+      // re-identifies the node in later analyses (pipeline construction moves
+      // nodes between the post-hoc match and the final optimization).
       var fallbackCandidates: List[LogicalPlan] = Nil
       def collectFallbackCandidates(node: LogicalPlan): Unit = {
         val candidateFieldNames = node.schema.map(_.name).toSet
+        // Site-identity: a candidate is the recorded site only if their
+        // expression fingerprints INTERSECT. Two same-shaped sites built over
+        // differently-typed sources (e.g. an implicit CAST for a JSON-inferred
+        // BIGINT vs an INT LocalRelation) have disjoint fingerprint sets —
+        // matching across them applied the mutation to the WRONG site.
+        val candidateSigSet =
+          if (pending.exprSigSet.isEmpty) Set.empty[String]
+          else meta.getOperatorType match {
+            case OperatorTypeDto.JOIN      => shim.exprSigSet(node, OperatorType.Join)
+            case OperatorTypeDto.FILTER    => shim.exprSigSet(node, OperatorType.Filter)
+            case OperatorTypeDto.AGGREGATE => shim.exprSigSet(node, OperatorType.Aggregate)
+            case OperatorTypeDto.WINDOW    => shim.exprSigSet(node, OperatorType.Window)
+            case OperatorTypeDto.PROJECT   => shim.exprSigSet(node, OperatorType.Project)
+            case OperatorTypeDto.OTHER     => Set.empty[String]
+          }
         if (!node.getTagValue(AlreadyMutatedTag).contains(true) &&
             node.schema.nonEmpty &&
             node.getClass.getSimpleName == pending.nodeClass &&
             (pending.referencedColumns.isEmpty ||
               pending.referencedColumns.exists(candidateFieldNames.contains)) &&
             !isInsertedNullGuard(node, pending.exprClasses) &&
-            offersMutationIndex(node, meta.getMutationIndex)) {
+            offersMutationIndex(node, meta.getMutationIndex) &&
+            (pending.exprSigSet.isEmpty ||
+              candidateSigSet.intersect(pending.exprSigSet).nonEmpty)) {
           fallbackCandidates = fallbackCandidates :+ node
         }
         node.children.foreach(collectFallbackCandidates)
@@ -653,18 +690,23 @@ object CatalystMutationRule {
       shapeFreeKey: String,
       nodeClass: String,
       referencedColumns: Set[String],
-      exprClasses: Set[String])
+      exprClasses: Set[String],
+      exprSigSet: Set[String])
 
   private val pendingRewrite = new AtomicReference[PendingRewrite](null)
 
   private def recordPendingRewrite(
-      mutantId: String, shapeFreeKey: String, node: LogicalPlan): Unit =
+      mutantId: String,
+      shapeFreeKey: String,
+      node: LogicalPlan,
+      exprSigSet: Set[String]): Unit =
     pendingRewrite.set(PendingRewrite(
       mutantId,
       shapeFreeKey,
       node.getClass.getSimpleName,
       node.expressions.flatMap(_.references).map(_.name).toSet,
-      node.expressions.flatMap(_.collect { case e => e.getClass.getSimpleName }).toSet))
+      node.expressions.flatMap(_.collect { case e => e.getClass.getSimpleName }).toSet,
+      exprSigSet))
 
   private def peekPendingRewrite(): PendingRewrite = pendingRewrite.get()
 
