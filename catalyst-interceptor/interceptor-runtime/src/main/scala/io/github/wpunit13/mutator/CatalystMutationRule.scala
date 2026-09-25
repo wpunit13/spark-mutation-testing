@@ -496,11 +496,14 @@ class CatalystMutationRule(shim: PlanMutatorShim, phase: CatalystMutationRule.Ph
         // fingerprint: the true evolved site still PRODUCES them, impostors
         // merely pass columns through. When the recording had computed sigs,
         // require the candidate to preserve at least one of them.
-        val computedRecorded = pending.exprSigSet.filterNot(TrivialSigPattern.matches)
+        // String.matches (not Regex.matches): Regex#matches only exists in
+        // Scala 2.13+, and this file also compiles under 2.12 (the _2.12
+        // bundle); String#matches delegates to Pattern in both binaries.
+        val computedRecorded = pending.exprSigSet.filterNot(_.matches(TrivialSigPattern))
         val sigOk =
           if (pending.exprSigSet.isEmpty) true
           else if (computedRecorded.isEmpty) intersection.nonEmpty
-          else intersection.exists(sig => !TrivialSigPattern.matches(sig))
+          else intersection.exists(sig => !sig.matches(TrivialSigPattern))
         if (!node.getTagValue(AlreadyMutatedTag).contains(true) &&
             node.schema.nonEmpty &&
             sameClass &&
@@ -745,8 +748,10 @@ object CatalystMutationRule {
   /** A sig that is exactly a positional attribute placeholder: the shim's
     * substituteAttrTokens renders a pure AttributeReference as "#<ordinal>".
     * Such a sig carries no site identity (every pass-through over the same
-    * columns renders identically); see the identity fallback's sig criterion. */
-  private[mutator] val TrivialSigPattern = "^#\\d+$".r
+    * columns renders identically); see the identity fallback's sig criterion.
+    * Deliberately a String (not Regex): consumed via String#matches, which
+    * exists in both Scala 2.12 and 2.13 — Regex#matches is 2.13-only. */
+  private[mutator] val TrivialSigPattern = "^#\\d+$"
 
   /**
    * Cross-phase handoff from PostHoc (match) to Optimizer (rewrite).
