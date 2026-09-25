@@ -5,6 +5,7 @@ import io.github.wpunit13.mutator.model.MutantMetadata;
 import io.github.wpunit13.mutator.model.OperatorTypeDto;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -175,18 +176,60 @@ final class InMemoryMutationCatalog implements MutationCatalogSink {
      * BIGINT vs an INT LocalRelation) produces a disjoint set and is dropped.
      * Entries without a hint (loaded from catalog.json in mutant forks, or
      * registered outside discovery) are always kept.
+     *
+     * The intersection check is COMPUTED-SIG-AWARE: a sig that is exactly a
+     * positional attribute placeholder ("#<ordinal>", the shim's rendering of
+     * a pure pass-through) collides across every same-shape node built over
+     * the same source columns, so an intersection consisting only of trivial
+     * sigs proves nothing about site identity. When the hint carries computed
+     * sigs (aliases, functions, literals — the site's actual fingerprint), an
+     * observation must contain at least one of THOSE to count as the same
+     * site. Without this, a site the optimizer eliminated entirely (e.g.
+     * ConvertToLocalRelation folding a withColumn Project into its
+     * LocalRelation) stays "viable" because impostor pass-through Projects
+     * share its trivial sigs — measured: 73 PROJECT mutants discovered on
+     * construction-time intermediate plans ran the full loop only to report
+     * NOT_APPLIED (the fallback then correctly refuses the impostors as
+     * ambiguous).
      */
     private boolean isViable(MutantMetadata entry) {
         SiteHint hint = siteHints.get(entry.getMutantId());
         if (hint == null) {
             return true;
         }
+        Set<String> computedHintSigs = new HashSet<>();
+        for (String sig : hint.exprSigSet()) {
+            if (!sig.matches("#\\d+")) {
+                computedHintSigs.add(sig);
+            }
+        }
         for (OptimizerObservation obs : optimizerObservations) {
             if (obs.nodeClass().equals(hint.nodeClass())
                     && obs.offeredMutationIndexes().contains(entry.getMutationIndex())
                     && !obs.insertedNullGuardOnly()
                     && !obs.exprSigSet().isEmpty()
-                    && obs.exprSigSet().stream().anyMatch(hint.exprSigSet()::contains)) {
+                    && sigSetsCorrelate(obs.exprSigSet(), hint.exprSigSet(), computedHintSigs)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** True when the observation's sig set correlates with the hint's: at
+      * least one computed (non-pass-through) sig shared when the hint has
+      * computed sigs, otherwise any shared sig. */
+    private static boolean sigSetsCorrelate(Set<String> obsSigs, Set<String> hintSigs,
+                                            Set<String> computedHintSigs) {
+        if (computedHintSigs.isEmpty()) {
+            for (String sig : obsSigs) {
+                if (hintSigs.contains(sig)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        for (String sig : obsSigs) {
+            if (computedHintSigs.contains(sig)) {
                 return true;
             }
         }

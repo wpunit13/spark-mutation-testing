@@ -81,7 +81,7 @@ import java.util.concurrent.atomic.AtomicReference
 class CatalystMutationRule(shim: PlanMutatorShim, phase: CatalystMutationRule.Phase)
   extends Rule[LogicalPlan] {
 
-  import CatalystMutationRule.{AlreadyMutatedTag, MutationPolicy, consumePendingRewrite, peekPendingRewrite, recordPendingRewrite}
+  import CatalystMutationRule.{AlreadyMutatedTag, MutationPolicy, TrivialSigPattern, consumePendingRewrite, peekPendingRewrite, recordPendingRewrite}
 
   override def apply(plan: LogicalPlan): LogicalPlan = {
     // Read the registry state exactly once per apply call: it can change
@@ -279,6 +279,24 @@ class CatalystMutationRule(shim: PlanMutatorShim, phase: CatalystMutationRule.Ph
         // No node matches after a full traversal: no-op, do not throw. The
         // honesty guard turns the residual no-match into a loud ERRORED at
         // the harness level (no rewrite -> no tracker record).
+        val found = new StringBuilder
+        var n = 0
+        var total = 0
+        var projects = 0
+        def collect(p: LogicalPlan, depth: Int, ord: Int): Unit = {
+          total += 1
+          if (p.getClass.getSimpleName == "Project") projects += 1
+          shim.classify(p, depth, ord).foreach { case (ot, cands) =>
+            if (toDto(ot) == meta.getOperatorType) {
+              cands.foreach { c =>
+                if (n < 8) { found.append(s" ${c.coordinate.toHex}:${c.mutationIndex}"); n += 1 }
+              }
+            }
+          }
+          p.children.zipWithIndex.foreach { case (ch, i) => collect(ch, depth + 1, i) }
+        }
+        collect(plan, 0, -1)
+        CatalystMutationRule.log(s"DIAG-POSTHOC-NOMATCH mutant=$activeMutantId type=${meta.getOperatorType} want=${meta.getCoordinateHex}:${meta.getMutationIndex} nodes=$total projects=$projects have=$found")
         plan
       case Some(node) =>
         // Record the node's shape-free key: the coordinate it yields when
@@ -414,15 +432,33 @@ class CatalystMutationRule(shim: PlanMutatorShim, phase: CatalystMutationRule.Ph
             case OperatorTypeDto.PROJECT   => shim.exprSigSet(node, OperatorType.Project)
             case OperatorTypeDto.OTHER     => Set.empty[String]
           }
+        val sameClass = node.getClass.getSimpleName == pending.nodeClass
+        val colsOk = pending.referencedColumns.isEmpty ||
+          pending.referencedColumns.exists(candidateFieldNames.contains)
+        val guardOk = !isInsertedNullGuard(node, pending.exprClasses)
+        val offersOk = offersMutationIndex(node, meta.getMutationIndex)
+        val intersection = candidateSigSet.intersect(pending.exprSigSet)
+        // Trivial sigs ("#<ordinal>") are pure attribute pass-throughs: every
+        // same-shape node built over the same source columns renders them
+        // identically, so they cannot disambiguate the recorded site from
+        // impostors (measured: 5 candidates all passing the old intersection
+        // check, refusing every intermediate-plan PROJECT mutant as ambiguous).
+        // Computed sigs (aliases, functions, literals) are the site's
+        // fingerprint: the true evolved site still PRODUCES them, impostors
+        // merely pass columns through. When the recording had computed sigs,
+        // require the candidate to preserve at least one of them.
+        val computedRecorded = pending.exprSigSet.filterNot(TrivialSigPattern.matches)
+        val sigOk =
+          if (pending.exprSigSet.isEmpty) true
+          else if (computedRecorded.isEmpty) intersection.nonEmpty
+          else intersection.exists(sig => !TrivialSigPattern.matches(sig))
         if (!node.getTagValue(AlreadyMutatedTag).contains(true) &&
             node.schema.nonEmpty &&
-            node.getClass.getSimpleName == pending.nodeClass &&
-            (pending.referencedColumns.isEmpty ||
-              pending.referencedColumns.exists(candidateFieldNames.contains)) &&
-            !isInsertedNullGuard(node, pending.exprClasses) &&
-            offersMutationIndex(node, meta.getMutationIndex) &&
-            (pending.exprSigSet.isEmpty ||
-              candidateSigSet.intersect(pending.exprSigSet).nonEmpty)) {
+            sameClass &&
+            colsOk &&
+            guardOk &&
+            offersOk &&
+            sigOk) {
           fallbackCandidates = fallbackCandidates :+ node
         }
         node.children.foreach(collectFallbackCandidates)
@@ -452,8 +488,10 @@ class CatalystMutationRule(shim: PlanMutatorShim, phase: CatalystMutationRule.Ph
         // rules. Keep the pending entry so later batches can still match;
         // if no batch ever matches, the honesty guard classifies the fork as
         // not-applied (tracker stays empty).
+        CatalystMutationRule.log(s"DIAG-OPT-NOMATCH mutant=$activeMutantId type=${meta.getOperatorType}")
         plan
       case Some(node) =>
+        CatalystMutationRule.log(s"DIAG-OPT-MATCH mutant=$activeMutantId type=${meta.getOperatorType}")
         val rewritten = meta.getOperatorType match {
           case OperatorTypeDto.JOIN      => shim.mutateJoin(node, meta.getMutationIndex)
           case OperatorTypeDto.FILTER    => shim.mutateFilter(node, meta.getMutationIndex)
@@ -654,6 +692,12 @@ object CatalystMutationRule {
 
   /** Tags a node that has already been rewritten for the active mutant. */
   private[mutator] val AlreadyMutatedTag = TreeNodeTag[Boolean]("spark-mutator.alreadyMutated")
+
+  /** A sig that is exactly a positional attribute placeholder: the shim's
+    * substituteAttrTokens renders a pure AttributeReference as "#<ordinal>".
+    * Such a sig carries no site identity (every pass-through over the same
+    * columns renders identically); see the identity fallback's sig criterion. */
+  private[mutator] val TrivialSigPattern = "^#\\d+$".r
 
   /**
    * Cross-phase handoff from PostHoc (match) to Optimizer (rewrite).

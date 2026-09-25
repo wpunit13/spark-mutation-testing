@@ -5,6 +5,8 @@ import org.apache.spark.sql.Row;
 import org.apache.spark.sql.expressions.Window;
 import org.apache.spark.sql.expressions.WindowSpec;
 
+import java.util.List;
+
 import static org.apache.spark.sql.functions.col;
 import static org.apache.spark.sql.functions.count;
 import static org.apache.spark.sql.functions.explode;
@@ -81,7 +83,8 @@ public final class Pipelines {
     /** Pivot: per-user spend per tag. */
     public static Dataset<Row> spendByTag(Dataset<Row> events) {
         Dataset<Row> flat = events.withColumn("tag", explode(col("tags")));
-        return flat.groupBy("user_id").pivot("tag").agg(sum("amount"));
+        // REPRO: explicit pivot values make the plan deterministic.
+        return flat.groupBy("user_id").pivot("tag", List.of("a", "b", "c")).agg(sum("amount"));
     }
 
     private static org.apache.spark.sql.Column callUdfTagLen(org.apache.spark.sql.Column tag) {
