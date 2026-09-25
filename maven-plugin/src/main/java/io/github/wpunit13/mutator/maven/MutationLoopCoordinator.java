@@ -5,6 +5,7 @@ import io.github.wpunit13.mutator.catalog.MutationCatalogIo;
 import io.github.wpunit13.mutator.model.MutantMetadata;
 import io.github.wpunit13.mutator.model.MutantResult;
 import io.github.wpunit13.mutator.model.MutantStatus;
+import io.github.wpunit13.mutator.model.OperatorTypeDto;
 import io.github.wpunit13.mutator.model.StructuralInvalidation;
 import io.github.wpunit13.mutator.report.AppliedMarkerStore;
 import io.github.wpunit13.mutator.report.DiffSnippetStore;
@@ -269,7 +270,8 @@ public class MutationLoopCoordinator {
         String reportPath = ReportWriter.writeReports(
                 outputDirectory, catalog, merged, reportConfig());
         return new MutationLoopResult(
-                catalog.size(), killed, survived, timedOut, errored, notApplied, score, reportPath);
+                catalog.size(), killed, survived, timedOut, errored, notApplied, score, reportPath,
+                ReportWriter.familyStats(catalog, merged));
     }
 
     private MutationLoopResult runLoop(long timeoutMillis) throws MojoFailureException, MojoExecutionException {
@@ -356,7 +358,8 @@ public class MutationLoopCoordinator {
                 errored,
                 notApplied,
                 score,
-                reportPath);
+                reportPath,
+                ReportWriter.familyStats(catalog, merged));
     }
 
     private void ensureOutputDirectory() throws MojoExecutionException {
@@ -674,6 +677,7 @@ public class MutationLoopCoordinator {
         private final int notApplied;
         private final double mutationScore;
         private final String reportPath;
+        private final Map<OperatorTypeDto, ReportWriter.FamilyStats> notAppliedByFamily;
 
         public MutationLoopResult(
                 int totalMutants,
@@ -684,6 +688,20 @@ public class MutationLoopCoordinator {
                 int notApplied,
                 double mutationScore,
                 String reportPath) {
+            this(totalMutants, killed, survived, timedOut, errored, notApplied, mutationScore,
+                    reportPath, Map.of());
+        }
+
+        public MutationLoopResult(
+                int totalMutants,
+                int killed,
+                int survived,
+                int timedOut,
+                int errored,
+                int notApplied,
+                double mutationScore,
+                String reportPath,
+                Map<OperatorTypeDto, ReportWriter.FamilyStats> notAppliedByFamily) {
             this.totalMutants = totalMutants;
             this.killed = killed;
             this.survived = survived;
@@ -692,6 +710,9 @@ public class MutationLoopCoordinator {
             this.notApplied = notApplied;
             this.mutationScore = mutationScore;
             this.reportPath = reportPath;
+            this.notAppliedByFamily = notAppliedByFamily == null
+                    ? Map.of()
+                    : Map.copyOf(notAppliedByFamily);
         }
 
         public int getTotalMutants() {
@@ -724,6 +745,17 @@ public class MutationLoopCoordinator {
 
         public String getReportPath() {
             return reportPath;
+        }
+
+        /**
+         * Per-family population counts for the WP-24 not-applied gate. Empty
+         * when the run produced no catalogued mutants. Consumed by
+         * {@code MutateMojo#enforceQualityGate} so the ratio can be scoped to
+         * an accountable set of families
+         * ({@code spark.mutator.notAppliedExemptMutators}).
+         */
+        public Map<OperatorTypeDto, ReportWriter.FamilyStats> getNotAppliedByFamily() {
+            return notAppliedByFamily;
         }
 
         @Override

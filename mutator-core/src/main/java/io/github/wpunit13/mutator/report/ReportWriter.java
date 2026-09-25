@@ -3,13 +3,19 @@ package io.github.wpunit13.mutator.report;
 import io.github.wpunit13.mutator.model.MutantMetadata;
 import io.github.wpunit13.mutator.model.MutantResult;
 import io.github.wpunit13.mutator.model.MutantStatus;
+import io.github.wpunit13.mutator.model.OperatorTypeDto;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
+import java.util.EnumMap;
+import java.util.EnumSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Public, instance-free facade for writing the full set of report artifacts
@@ -44,6 +50,16 @@ public final class ReportWriter {
     /** WP-24 governance-gate knobs (one key, both surfaces). */
     public static final String PROP_MAX_ERRORED_COUNT = "spark.mutator.maxErroredCount";
     public static final String PROP_MAX_NOT_APPLIED_RATIO = "spark.mutator.maxNotAppliedRatio";
+
+    /**
+     * WP-24 not-applied gate scope (one key, both surfaces): comma-separated
+     * {@link OperatorTypeDto} names whose not-applied mutants are exempt from the
+     * ratio check. Empty (the default) keeps the gate global — every family
+     * counts. See
+     * {@link #evaluateGateViolations(int, int, int, int, int, double, Map, Set)}.
+     */
+    public static final String PROP_NOT_APPLIED_EXEMPT_MUTATORS =
+            "spark.mutator.notAppliedExemptMutators";
 
     /** Mechanism-(c) CI sharding knobs (one key, both surfaces). */
     public static final String PROP_SHARDS = "spark.mutator.shards";
@@ -225,13 +241,17 @@ public final class ReportWriter {
      *   <li><b>Real-failure ERRORED</b> (dead sessions, shim violations,
      *       mutation crashes) — zero tolerance by default:
      *       {@code errored > maxErroredCount} fails. A negative
-       *       {@code maxErroredCount} disables the check.</li>
+     *       {@code maxErroredCount} disables the check.</li>
      *   <li><b>Designed not-applied</b> (nodes hidden inside caches, pruned
      *       stubs, shapes that never execute) — ratio-gated:
      *       {@code notApplied / (total - skipped) > maxNotAppliedRatio}
-       *       fails. A negative {@code maxNotAppliedRatio} disables the
-       *       check.</li>
+     *       fails. A negative {@code maxNotAppliedRatio} disables the
+     *       check.</li>
      * </ul>
+     *
+     * <p>This overload is the global form: every operator family counts. Use
+     * {@link #evaluateGateViolations(int, int, int, int, int, double, Map, Set)}
+     * to scope the not-applied ratio to an accountable set of families.
      *
      * <p>The score formula is deliberately untouched: NOT_APPLIED and ERRORED
      * are excluded from both terms, exactly as before the split.
@@ -243,6 +263,48 @@ public final class ReportWriter {
             int skipped,
             int maxErroredCount,
             double maxNotAppliedRatio) {
+        return evaluateGateViolations(total, errored, notApplied, skipped,
+                maxErroredCount, maxNotAppliedRatio, Map.of(), Set.of());
+    }
+
+    /**
+     * Per-family variant of
+     * {@link #evaluateGateViolations(int, int, int, int, int, double)}. The
+     * ERRORED check is identical; only the not-applied ratio becomes
+     * scope-aware.
+     *
+     * <p>When {@code notAppliedExemptFamilies} is non-empty, the not-applied
+     * ratio is evaluated over the <b>accountable population</b> only: the
+     * families present in {@code familyStats} that are NOT exempt. Both the
+     * numerator (not-applied) and the denominator (total − skipped) are
+     * restricted to those families, so an exempt family cannot dilute the
+     * ratio. An empty exempt set (or empty {@code familyStats}) reproduces the
+     * global check exactly.
+     *
+     * <p>Why this exists: some operator families drift under Catalyst
+     * rewriting far more than others. {@code PROJECT} nodes are the extreme —
+     * the optimizer collapses aliases and prunes columns, so the identity
+     * fallback refuses ambiguous matches and the run reports a load-sensitive
+     * designed not-applied tail (measured 0.14 locally vs 0.28 on CI for one
+     * plan). A global ratio gate then flakes on {@code PROJECT} churn, while
+     * what the gate should catch is a real regression (e.g. the shim stops
+     * applying to {@code FILTER}/{@code JOIN}). Exempting the noisy family
+     * keeps the gate sharp on the rest.
+     *
+     * <p>Trade-off, stated plainly: an exempt family's not-applied mutants are
+     * not gated at all — a breakage confined to an exempt family passes. Keep
+     * the exempt list narrow, and read the report's {@code notApplied} count to
+     * watch the exempt families by hand.
+     */
+    public static List<String> evaluateGateViolations(
+            int total,
+            int errored,
+            int notApplied,
+            int skipped,
+            int maxErroredCount,
+            double maxNotAppliedRatio,
+            Map<OperatorTypeDto, FamilyStats> familyStats,
+            Set<OperatorTypeDto> notAppliedExemptFamilies) {
         List<String> violations = new ArrayList<>();
         if (maxErroredCount >= 0 && errored > maxErroredCount) {
             violations.add("real-failure ERRORED count " + errored
@@ -250,14 +312,134 @@ public final class ReportWriter {
                     + " (dead sessions, shim violations, or mutation crashes)");
         }
         if (maxNotAppliedRatio >= 0) {
-            int denominator = total - skipped;
-            double ratio = denominator <= 0 ? 0.0 : (notApplied / (double) denominator);
+            boolean scoped = notAppliedExemptFamilies != null
+                    && !notAppliedExemptFamilies.isEmpty()
+                    && familyStats != null
+                    && !familyStats.isEmpty();
+            int scopedTotal = total;
+            int scopedSkipped = skipped;
+            int scopedNotApplied = notApplied;
+            if (scoped) {
+                scopedTotal = 0;
+                scopedSkipped = 0;
+                scopedNotApplied = 0;
+                for (Map.Entry<OperatorTypeDto, FamilyStats> entry : familyStats.entrySet()) {
+                    if (notAppliedExemptFamilies.contains(entry.getKey())) {
+                        continue;
+                    }
+                    FamilyStats stats = entry.getValue();
+                    scopedTotal += stats.getTotal();
+                    scopedSkipped += stats.getSkipped();
+                    scopedNotApplied += stats.getNotApplied();
+                }
+            }
+            int denominator = scopedTotal - scopedSkipped;
+            double ratio = denominator <= 0 ? 0.0 : (scopedNotApplied / (double) denominator);
             if (ratio > maxNotAppliedRatio) {
-                violations.add("not-applied ratio " + ratio + " (" + notApplied + "/"
-                        + denominator + ") exceeds maxNotAppliedRatio " + maxNotAppliedRatio);
+                String scope = scoped ? " (excluding " + notAppliedExemptFamilies + ")" : "";
+                violations.add("not-applied ratio " + ratio + " (" + scopedNotApplied + "/"
+                        + denominator + ")" + scope
+                        + " exceeds maxNotAppliedRatio " + maxNotAppliedRatio);
             }
         }
         return violations;
+    }
+
+    /**
+     * Aggregates per-family population counts from a catalog + outcome map.
+     * Families with no catalogued mutants are absent from the result. A
+     * catalogued mutant with no recorded outcome still counts toward its
+     * family's {@code total} — mirroring {@code summary.totalMutants}.
+     */
+    public static Map<OperatorTypeDto, FamilyStats> familyStats(
+            Collection<MutantMetadata> catalog,
+            Map<String, MutantResult> results) {
+        Map<OperatorTypeDto, int[]> acc = new EnumMap<>(OperatorTypeDto.class);
+        for (MutantMetadata meta : catalog) {
+            int[] counts = acc.computeIfAbsent(meta.getOperatorType(), k -> new int[3]);
+            counts[0]++;
+            MutantResult result = results.get(meta.getMutantId());
+            if (result == null) {
+                continue;
+            }
+            switch (result.getStatus()) {
+                case NOT_APPLIED -> counts[1]++;
+                case SKIPPED -> counts[2]++;
+                default -> { }
+            }
+        }
+        Map<OperatorTypeDto, FamilyStats> stats = new EnumMap<>(OperatorTypeDto.class);
+        acc.forEach((family, counts) ->
+                stats.put(family, new FamilyStats(counts[0], counts[1], counts[2])));
+        return stats;
+    }
+
+    /**
+     * Parses a comma-separated list of {@link OperatorTypeDto} names
+     * (case-insensitive, blank-tolerant) into a family set. Unknown tokens are
+     * ignored, so a typo narrows the check's scope rather than failing the run.
+     */
+    public static Set<OperatorTypeDto> parseOperatorTypesCsv(String csv) {
+        if (csv == null || csv.isBlank()) {
+            return Set.of();
+        }
+        return parseOperatorTypes(Arrays.asList(csv.split(",")));
+    }
+
+    /** @see #parseOperatorTypesCsv(String) */
+    public static Set<OperatorTypeDto> parseOperatorTypes(Collection<String> names) {
+        Set<OperatorTypeDto> families = EnumSet.noneOf(OperatorTypeDto.class);
+        if (names == null) {
+            return families;
+        }
+        for (String name : names) {
+            if (name == null || name.isBlank()) {
+                continue;
+            }
+            try {
+                families.add(OperatorTypeDto.valueOf(name.trim().toUpperCase(Locale.ROOT)));
+            } catch (IllegalArgumentException ignored) {
+                // Unknown family name: ignore (a typo must not fail the run).
+            }
+        }
+        return families;
+    }
+
+    /**
+     * Per-operator-family outcome populations feeding the WP-24 not-applied
+     * gate. {@code total} counts catalogued mutants of the family (whether or
+     * not they produced an outcome); {@code notApplied} and {@code skipped}
+     * count recorded outcomes.
+     */
+    public static final class FamilyStats {
+
+        private final int total;
+        private final int notApplied;
+        private final int skipped;
+
+        public FamilyStats(int total, int notApplied, int skipped) {
+            this.total = total;
+            this.notApplied = notApplied;
+            this.skipped = skipped;
+        }
+
+        public int getTotal() {
+            return total;
+        }
+
+        public int getNotApplied() {
+            return notApplied;
+        }
+
+        public int getSkipped() {
+            return skipped;
+        }
+
+        @Override
+        public String toString() {
+            return "FamilyStats{total=" + total + ", notApplied=" + notApplied
+                    + ", skipped=" + skipped + '}';
+        }
     }
 
     /**

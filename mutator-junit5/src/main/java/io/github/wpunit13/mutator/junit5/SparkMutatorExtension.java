@@ -312,8 +312,10 @@ public class SparkMutatorExtension implements
 
         // WP-24 governance gate: real-failure ERRORED is zero-tolerance (a
         // dead session or shim violation means the harness/engine is broken);
-        // the designed not-applied population is ratio-gated. Runs after the
-        // report is written so the artifact survives the failure.
+        // the designed not-applied population is ratio-gated, optionally scoped
+        // to an accountable set of operator families via
+        // spark.mutator.notAppliedExemptMutators. Runs after the report is
+        // written so the artifact survives the failure.
         List<String> populationViolations = ReportWriter.evaluateGateViolations(
                 MutationCatalogAccess.allEntries().size(),
                 ReportSink.countByStatus(MutantStatus.ERRORED),
@@ -322,7 +324,10 @@ public class SparkMutatorExtension implements
                 intProperty(MutantBootstrap.PROP_MAX_ERRORED_COUNT,
                         ReportWriter.DEFAULT_MAX_ERRORED_COUNT),
                 doubleProperty(MutantBootstrap.PROP_MAX_NOT_APPLIED_RATIO,
-                        ReportWriter.DEFAULT_MAX_NOT_APPLIED_RATIO));
+                        ReportWriter.DEFAULT_MAX_NOT_APPLIED_RATIO),
+                ReportSink.familyStats(),
+                ReportWriter.parseOperatorTypesCsv(
+                        System.getProperty(MutantBootstrap.PROP_NOT_APPLIED_EXEMPT_MUTATORS)));
         if (!populationViolations.isEmpty()) {
             throw new IllegalStateException(
                     "WP-24 governance gate failed: " + String.join("; ", populationViolations));

@@ -30,6 +30,13 @@ public final class MutantBootstrap {
     /** WP-24 governance-gate knobs (one key, both surfaces). */
     public static final String PROP_MAX_ERRORED_COUNT = "spark.mutator.maxErroredCount";
     public static final String PROP_MAX_NOT_APPLIED_RATIO = "spark.mutator.maxNotAppliedRatio";
+    /**
+     * Comma-separated {@code OperatorTypeDto} names whose not-applied mutants
+     * are exempt from the {@code maxNotAppliedRatio} check. Empty disables the
+     * exemption (the ratio is global).
+     */
+    public static final String PROP_NOT_APPLIED_EXEMPT_MUTATORS =
+            "spark.mutator.notAppliedExemptMutators";
 
     /** Magic value marking the externally-orchestrated baseline run. */
     public static final String PHASE_BASELINE = "baseline";

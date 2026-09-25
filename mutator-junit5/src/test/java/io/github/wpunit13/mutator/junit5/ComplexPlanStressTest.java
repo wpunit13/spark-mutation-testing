@@ -225,6 +225,30 @@ class ComplexPlanStressTest {
     }
 
     // ------------------------------------------------------------------
+    // Test 3: determinism — the library pins AQE off, so repeated runs of the
+    // same fixture must classify identically
+    // ------------------------------------------------------------------
+
+    @Test
+    void classificationIsStableAcrossRepeatedRuns() throws Exception {
+        Map<String, String> baseline = null;
+        for (int run = 0; run < 3; run++) {
+            JsonNode report = runFixture(ComplexPipelineCase.class,
+                    tempDir.resolve("stable-" + run));
+            Map<String, String> statuses = statusMap(report);
+            if (baseline == null) {
+                baseline = statuses;
+            } else {
+                assertEquals(baseline, statuses,
+                        "classification must be identical across runs (run " + run
+                                + "); a divergence means the engine classified the same "
+                                + "plan differently, which is the nondeterminism this "
+                                + "test guards against");
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
     // Fixture: the complex pipeline, driven per mutant by the loop
     // ------------------------------------------------------------------
 
