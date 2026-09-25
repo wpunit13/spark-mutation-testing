@@ -41,7 +41,10 @@ ARTIFACTS=(
 
 missing=()
 for artifact in "${ARTIFACTS[@]}"; do
-  args=(-B -q dependency:get -Dartifact="$GROUP:$artifact:$VERSION")
+  # -U: defeat any Maven-side caching of failed lookups — this script is
+  # retried in a poll loop while Central's CDN sync catches up, and a stale
+  # negative result must never outlive the sync.
+  args=(-B -q -U dependency:get -Dartifact="$GROUP:$artifact:$VERSION")
   if [ -n "$REPO_URL" ]; then
     args+=(-DremoteRepositories="$REPO_URL")
   fi

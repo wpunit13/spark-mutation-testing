@@ -245,7 +245,18 @@ jobs:
         run: |
           python -m venv "$RUNNER_TEMP/venv"
           . "$RUNNER_TEMP/venv/bin/activate"
-          pip install "pytest-spark-mutation-testing==$VERSION"
+          # PyPI serves an upload quickly but not atomically with the publish
+          # job's completion — retry rather than racing the CDN.
+          installed=false
+          for _ in $(seq 1 10); do
+            if pip install "pytest-spark-mutation-testing==$VERSION"; then
+              installed=true
+              break
+            fi
+            echo "Not on PyPI yet — waiting 30s..."
+            sleep 30
+          done
+          [ "$installed" = true ] || { echo "ERROR: wheel not installable from PyPI after 5 minutes" >&2; exit 1; }
           python - <<'PY'
           import glob, pytest_spark_mutator
           jars = glob.glob(
@@ -274,4 +285,8 @@ jobs:
             sleep 60
           done
           echo "ERROR: release coordinates not resolvable from Central after 30 minutes" >&2
+          echo "Known causes: (a) first-release manual review in the Central Portal takes" >&2
+          echo "longer than the poll — approve the deployment, then re-run this job alone via" >&2
+          echo "workflow_dispatch with inputs.jobs=smoke-only; (b) CDN sync lagging past 30 min —" >&2
+          echo "same re-run. The publish itself succeeded; only this verification timed out." >&2
           exit 1
