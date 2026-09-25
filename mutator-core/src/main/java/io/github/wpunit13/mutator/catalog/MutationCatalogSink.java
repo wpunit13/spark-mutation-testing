@@ -45,17 +45,22 @@ public interface MutationCatalogSink {
     }
 
     /**
-     * Records the discovery-time SHAPE-FREE key of the candidate's plan node:
-     * the coordinate the node yields when classified as a plan root
-     * (depth=0, ordinal=-1) — position-independent, so it is invariant across
-     * the construction-vs-count-wrapped analyzed-plan shapes the fork-time
-     * PostHoc match otherwise depends on. The PostHoc no-match path seeds the
-     * pending rewrite from this key when the positional coordinate is absent
-     * from the fork's plans (a match the fork could otherwise miss entirely —
-     * measured: the same mutant flips KILLED/NOT_APPLIED across runs purely
-     * on which shape reaches the match phase first).
+     * Records the discovery-time re-anchor keys of the candidate's plan node:
+     * the SHAPE-FREE key (the coordinate the node yields when classified as a
+     * plan root — depth/ordinal-independent) and the DEEP key (a hash of the
+     * node's whole subtree fingerprint — class + schema per node, recursive).
+     * The PostHoc no-match path uses them to re-anchor the pending rewrite
+     * when the positional coordinate is absent from the fork's plans
+     * (measured: a pipeline analyzed plain vs count()-wrapped — the join sits
+     * at depth 8 vs 9). The shallow key alone is NOT a safe anchor: same-
+     * shaped nodes in DIFFERENT queries share it (measured: a hardened-branch
+     * Project and a weak-branch Project with identical output schemas —
+     * re-anchoring on the shallow key alone moved weak-branch mutations onto
+     * the hardened branch and flipped designed SURVIVED to KILLED). The deep
+     * key separates them: same query, different wrapper → identical subtree;
+     * different query → different subtree.
      */
-    default void recordShapeFreeKey(String mutantId, String shapeFreeKey) {
+    default void recordReAnchorKey(String mutantId, String shapeFreeKey, String deepKey) {
     }
 
     /**

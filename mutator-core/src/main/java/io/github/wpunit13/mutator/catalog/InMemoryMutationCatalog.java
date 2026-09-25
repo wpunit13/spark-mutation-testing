@@ -34,13 +34,17 @@ final class InMemoryMutationCatalog implements MutationCatalogSink {
             boolean insertedNullGuardOnly, Set<String> exprSigSet) {
     }
 
+    /** Re-anchor identity recorded at discovery (see the sink javadoc). */
+    record ReAnchorKey(String shapeFreeKey, String deepKey) {
+    }
+
     private static final class Holder {
         static final InMemoryMutationCatalog INSTANCE = new InMemoryMutationCatalog();
     }
 
     private final Map<String, MutantMetadata> catalog = new ConcurrentHashMap<>();
     private final Map<String, SiteHint> siteHints = new ConcurrentHashMap<>();
-    private final Map<String, String> shapeFreeKeys = new ConcurrentHashMap<>();
+    private final Map<String, ReAnchorKey> reAnchorKeys = new ConcurrentHashMap<>();
     private final Set<OptimizerObservation> optimizerObservations = ConcurrentHashMap.newKeySet();
 
     /**
@@ -121,13 +125,13 @@ final class InMemoryMutationCatalog implements MutationCatalogSink {
     }
 
     @Override
-    public void recordShapeFreeKey(String mutantId, String shapeFreeKey) {
-        shapeFreeKeys.putIfAbsent(mutantId, shapeFreeKey);
+    public void recordReAnchorKey(String mutantId, String shapeFreeKey, String deepKey) {
+        reAnchorKeys.putIfAbsent(mutantId, new ReAnchorKey(shapeFreeKey, deepKey));
     }
 
-    /** The discovery-time shape-free key for {@code mutantId}, or null. */
-    String shapeFreeKeyOrNull(String mutantId) {
-        return shapeFreeKeys.get(mutantId);
+    /** The discovery-time re-anchor keys for {@code mutantId}, or null. */
+    ReAnchorKey reAnchorKeyOrNull(String mutantId) {
+        return reAnchorKeys.get(mutantId);
     }
 
     @Override
@@ -300,7 +304,7 @@ final class InMemoryMutationCatalog implements MutationCatalogSink {
     void clearForTesting() {
         catalog.clear();
         siteHints.clear();
-        shapeFreeKeys.clear();
+        reAnchorKeys.clear();
         optimizerObservations.clear();
         mutationLoopStarted = false;
         lastLoggedDropCount = -1;

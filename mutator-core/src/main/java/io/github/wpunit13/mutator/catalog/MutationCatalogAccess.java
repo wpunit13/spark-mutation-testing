@@ -45,13 +45,24 @@ public final class MutationCatalogAccess {
     }
 
     /**
-     * The discovery-time shape-free key recorded for {@code mutantId}, or
-     * null when discovery never recorded one. See
-     * {@link MutationCatalogSink#recordShapeFreeKey} for what the key is and
-     * why the PostHoc no-match path falls back to it.
+     * The discovery-time SHAPE-FREE re-anchor key recorded for
+     * {@code mutantId}, or null when discovery never recorded one. See
+     * {@link MutationCatalogSink#recordReAnchorKey}.
      */
     public static String shapeFreeKeyOrNull(String mutantId) {
-        return InMemoryMutationCatalog.getInstance().shapeFreeKeyOrNull(mutantId);
+        InMemoryMutationCatalog.ReAnchorKey key =
+                InMemoryMutationCatalog.getInstance().reAnchorKeyOrNull(mutantId);
+        return key == null ? null : key.shapeFreeKey();
+    }
+
+    /**
+     * The discovery-time DEEP re-anchor key (subtree fingerprint) recorded
+     * for {@code mutantId}, or null. See {@link MutationCatalogSink#recordReAnchorKey}.
+     */
+    public static String deepKeyOrNull(String mutantId) {
+        InMemoryMutationCatalog.ReAnchorKey key =
+                InMemoryMutationCatalog.getInstance().reAnchorKeyOrNull(mutantId);
+        return key == null ? null : key.deepKey();
     }
 
     /**

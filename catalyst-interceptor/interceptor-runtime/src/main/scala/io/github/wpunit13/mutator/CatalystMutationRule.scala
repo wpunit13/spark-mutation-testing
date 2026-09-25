@@ -172,20 +172,23 @@ class CatalystMutationRule(shim: PlanMutatorShim, phase: CatalystMutationRule.Ph
               coordinateHex,
               mutantId)
             MutationCatalogAccess.sink().recordSiteHint(mutantId, nodeClass, referencedColumns, exprClasses, siteSigSet)
-            // Shape-free re-anchor: the node's root classification. The
-            // fork-time PostHoc match keys on the POSITIONAL coordinate
-            // (depth- and ordinal-sensitive), so a candidate discovered on a
-            // construction-time plan shape can be absent from every plan the
-            // fork re-analyzes when the harness rebuilds the same pipeline
-            // under a different top-level consumer (e.g. the plain pipeline
-            // vs a count()-wrapped one). The shape-free key survives both
-            // shapes, letting the no-match path re-anchor the pending.
-            MutationCatalogAccess.sink().recordShapeFreeKey(
+            // Re-anchor identity: the node's SHAPE-FREE key (root
+            // classification — depth/ordinal-independent) plus a DEEP subtree
+            // fingerprint. The fork-time PostHoc match keys on the POSITIONAL
+            // coordinate, so a candidate discovered on one analyzed-plan shape
+            // can be absent from every shape the fork re-analyzes when a
+            // top-level consumer wraps the same pipeline (measured: a plain
+            // pipeline vs a count()-wrapped one — the join sits at depth 8 vs
+            // 9). The shape-free key survives both shapes; the deep key keeps
+            // the re-anchor from crossing queries (same-shaped nodes in
+            // different queries share the shape-free key but not the subtree).
+            MutationCatalogAccess.sink().recordReAnchorKey(
               mutantId,
               shim.classify(node, 0, -1)
                 .map(_._2.filter(_.mutationIndex == candidate.mutationIndex)
                   .map(_.coordinate.toHex).mkString(","))
-                .getOrElse(""))
+                .getOrElse(""),
+              DeterministicHasher.hashToHex(deepFingerprint(node)))
           }
         }
       }
@@ -290,22 +293,32 @@ class CatalystMutationRule(shim: PlanMutatorShim, phase: CatalystMutationRule.Ph
         // can be absent from every shape the fork re-analyzes (measured: a
         // construction-time pipeline vs the count()-wrapped rebuild — the
         // join sits at depth 8 vs 9, one node off). The discovery-time
-        // SHAPE-FREE key survives both shapes; if some node in THIS plan
-        // classifies to it, that node is the recorded site and the pending
-        // is seeded from it. Never crash the rule; if no node carries the
-        // key either, the honesty guard's not-applied classification stands.
-        val shapeFree = Option(MutationCatalogAccess.shapeFreeKeyOrNull(activeMutantId))
+        // re-anchor keys survive both shapes: a node whose SHAPE-FREE
+        // classification matches AND whose whole subtree fingerprint equals
+        // the recorded one is the recorded site (same query, different
+        // top-level wrapper). The deep key is what keeps this from crossing
+        // queries: same-shaped nodes in DIFFERENT queries share the
+        // shape-free key but not the subtree (measured: a hardened-branch
+        // Project and a weak-branch Project with identical output schemas —
+        // shallow-only re-anchoring moved weak-branch mutations onto the
+        // hardened branch and flipped designed SURVIVED to KILLED). If no
+        // node carries both keys, the honesty guard's not-applied
+        // classification stands.
+        val shallowOpt = Option(MutationCatalogAccess.shapeFreeKeyOrNull(activeMutantId))
           .filter(_.nonEmpty)
-          .map(_.split(",").toSet)
-          .getOrElse(Set.empty[String])
+        val deepOpt = Option(MutationCatalogAccess.deepKeyOrNull(activeMutantId))
+          .filter(_.nonEmpty)
         var reAnchor: Option[LogicalPlan] = None
-        if (shapeFree.nonEmpty) {
+        if (shallowOpt.isDefined && deepOpt.isDefined) {
           def find(node: LogicalPlan): Unit = {
             if (reAnchor.isEmpty) {
               shim.classify(node, 0, -1).foreach { case (operatorType, candidates) =>
                 if (toDto(operatorType) == meta.getOperatorType) {
-                  val keys = candidates.map(_.coordinate.toHex).toSet
-                  if (shapeFree.forall(keys.contains)) {
+                  val offersKey = candidates.exists { candidate =>
+                    candidate.coordinate.toHex == shallowOpt.get &&
+                      candidate.mutationIndex == meta.getMutationIndex
+                  }
+                  if (offersKey && DeterministicHasher.hashToHex(deepFingerprint(node)) == deepOpt.get) {
                     reAnchor = Some(node)
                   }
                 }
@@ -324,7 +337,7 @@ class CatalystMutationRule(shim: PlanMutatorShim, phase: CatalystMutationRule.Ph
               }
             }
             CatalystMutationRule.log(
-              s"DIAG-POSTHOC-REANCHOR mutant=$activeMutantId shapeFreeKey=${shapeFree.mkString(",")} " +
+              s"DIAG-POSTHOC-REANCHOR mutant=$activeMutantId shapeFreeKey=${shallowOpt.getOrElse("-")} " +
                 s"node=${node.getClass.getSimpleName}")
           case None =>
             val found = new StringBuilder
@@ -636,6 +649,21 @@ class CatalystMutationRule(shim: PlanMutatorShim, phase: CatalystMutationRule.Ph
           }
       }
     }
+  }
+
+  /**
+   * Position-free subtree fingerprint: class simple name + output schema
+   * (names and types — exprId-free) per node, recursive over children. Two
+   * analyses of the SAME query produce identical fingerprints regardless of
+   * top-level wrappers (the fingerprint is rooted at the node, so ancestors
+   * are invisible); two DIFFERENT queries with same-shaped roots differ in
+   * the subtree. This is the re-anchor identity's deep half.
+   */
+  private def deepFingerprint(p: LogicalPlan): String = {
+    val self = p.getClass.getSimpleName +
+      "[" + p.schema.fields.map(f => f.name + ":" + f.dataType.simpleString).mkString(",") + "]"
+    if (p.children.isEmpty) self + "()"
+    else self + "(" + p.children.map(deepFingerprint).mkString(";") + ")"
   }
 
   /** Explicit total mapping; no string reflection. */
