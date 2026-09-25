@@ -4,6 +4,7 @@ import io.github.wpunit13.mutator.MutantBootstrap;
 import io.github.wpunit13.mutator.catalog.MutationCatalogAccess;
 import io.github.wpunit13.mutator.model.MutantResult;
 import io.github.wpunit13.mutator.model.MutantStatus;
+import io.github.wpunit13.mutator.model.OperatorTypeDto;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -105,6 +106,16 @@ public final class ReportSink {
             }
         }
         return count;
+    }
+
+    /**
+     * Per-family outcome populations for the WP-24 not-applied gate, derived
+     * from the singleton catalog (operator types) and the recorded outcomes.
+     * Used by the in-process paths (JUnit 5 extension, PySpark driver) to scope
+     * the gate to an accountable set of operator families.
+     */
+    public static Map<OperatorTypeDto, ReportWriter.FamilyStats> familyStats() {
+        return ReportWriter.familyStats(MutationCatalogAccess.allEntries(), snapshotResults());
     }
 
     /** Read accessor used by the report writers. */

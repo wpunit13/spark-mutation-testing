@@ -10,6 +10,8 @@ import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.catalyst.trees.TreeNodeTag
 import org.slf4j.LoggerFactory
 
+import scala.jdk.CollectionConverters._
+
 import java.io.IOException
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
@@ -79,7 +81,7 @@ import java.util.concurrent.atomic.AtomicReference
 class CatalystMutationRule(shim: PlanMutatorShim, phase: CatalystMutationRule.Phase)
   extends Rule[LogicalPlan] {
 
-  import CatalystMutationRule.{AlreadyMutatedTag, MutationPolicy, consumePendingRewrite, peekPendingRewrite, recordPendingRewrite}
+  import CatalystMutationRule.{AlreadyMutatedTag, MutationPolicy, TrivialSigPattern, consumePendingRewrite, peekPendingRewrite, recordPendingRewrite}
 
   override def apply(plan: LogicalPlan): LogicalPlan = {
     // Read the registry state exactly once per apply call: it can change
@@ -88,13 +90,17 @@ class CatalystMutationRule(shim: PlanMutatorShim, phase: CatalystMutationRule.Ph
     if (activeMutantId == null) {
       phase match {
         case CatalystMutationRule.PostHoc   => discovery(plan)
-        case CatalystMutationRule.Optimizer => plan
+        case CatalystMutationRule.Optimizer => observeOptimizedPlan(plan)
       }
     } else {
-      phase match {
+      val result = phase match {
         case CatalystMutationRule.PostHoc   => matchAndRecord(plan, activeMutantId)
         case CatalystMutationRule.Optimizer => rewriteMatched(plan, activeMutantId)
       }
+      // Any activation freezes discovery/observation for the rest of the
+      // JVM's life (reset only with the catalog, at the next baseline).
+      MutationCatalogAccess.markMutationLoopStarted()
+      result
     }
   }
 
@@ -117,6 +123,11 @@ class CatalystMutationRule(shim: PlanMutatorShim, phase: CatalystMutationRule.Ph
    *    failure mode in disguise.
    */
   private def discovery(plan: LogicalPlan): LogicalPlan = {
+    if (MutationCatalogAccess.isMutationLoopStarted() && !java.lang.Boolean.getBoolean("spark.mutator.freeze.disabled")) {
+      // Transient IDLE window inside a mutant re-run (the harness clears the
+      // active mutant between test methods): never discover from mutated plans.
+      return plan
+    }
     val policy = MutationPolicy.fromSystemProperties()
     CatalystMutationRule.warnUnrecognizedExclusionsOnce(policy.unrecognizedExclusions)
     val hint = CatalystMutationRule.currentFilePathHint
@@ -135,6 +146,14 @@ class CatalystMutationRule(shim: PlanMutatorShim, phase: CatalystMutationRule.Ph
           excludedSkips += 1
         } else if (targetAllowed) {
           val operatorTag = NodeCoordinateFactory.operatorTypeTag(operatorType)
+          // Viability hint: the node's execution-time identity. Candidates
+          // whose site never reaches an optimizer batch (pushed into scans,
+          // collapsed by later rules) could only ever report NOT_APPLIED —
+          // the catalog's viability filter drops them at write time.
+          val nodeClass = node.getClass.getSimpleName
+          val referencedColumns = node.expressions.flatMap(_.references).map(_.name).toSet.asJava
+          val exprClasses = node.expressions.flatMap(_.collect { case e => e.getClass.getSimpleName }).toSet.asJava
+          val siteSigSet = shim.exprSigSet(node, operatorType).asJava
           candidates.foreach { candidate =>
             val coordinateHex = candidate.coordinate.toHex
             val mutantId = DeterministicHasher.computeMutantId(
@@ -152,6 +171,24 @@ class CatalystMutationRule(shim: PlanMutatorShim, phase: CatalystMutationRule.Ph
               candidate.description,
               coordinateHex,
               mutantId)
+            MutationCatalogAccess.sink().recordSiteHint(mutantId, nodeClass, referencedColumns, exprClasses, siteSigSet)
+            // Re-anchor identity: the node's SHAPE-FREE key (root
+            // classification — depth/ordinal-independent) plus a DEEP subtree
+            // fingerprint. The fork-time PostHoc match keys on the POSITIONAL
+            // coordinate, so a candidate discovered on one analyzed-plan shape
+            // can be absent from every shape the fork re-analyzes when a
+            // top-level consumer wraps the same pipeline (measured: a plain
+            // pipeline vs a count()-wrapped one — the join sits at depth 8 vs
+            // 9). The shape-free key survives both shapes; the deep key keeps
+            // the re-anchor from crossing queries (same-shaped nodes in
+            // different queries share the shape-free key but not the subtree).
+            MutationCatalogAccess.sink().recordReAnchorKey(
+              mutantId,
+              shim.classify(node, 0, -1)
+                .map(_._2.filter(_.mutationIndex == candidate.mutationIndex)
+                  .map(_.coordinate.toHex).mkString(","))
+                .getOrElse(""),
+              DeterministicHasher.hashToHex(deepFingerprint(node)))
           }
         }
       }
@@ -167,6 +204,37 @@ class CatalystMutationRule(shim: PlanMutatorShim, phase: CatalystMutationRule.Ph
           policy.excludedOperators.mkString("{", ", ", "}") +
           " (spark.mutator.excludedMutators)")
     }
+    plan
+  }
+
+  /**
+   * Branch A2 — Discovery mode (registry IDLE, Optimizer phase). Records
+   * which nodes reach optimizer batches and which mutation indexes their
+   * classification offers. The catalog's viability filter matches
+   * discovery-time site hints against these observations: a candidate whose
+   * site never appears here can never be matched by the Optimizer-phase
+   * rule (exact shape-free key or identity fallback) and would only ever
+   * report NOT_APPLIED. The plan is returned unchanged.
+   */
+  private def observeOptimizedPlan(plan: LogicalPlan): LogicalPlan = {
+    if (MutationCatalogAccess.isMutationLoopStarted() && !java.lang.Boolean.getBoolean("spark.mutator.freeze.disabled")) {
+      // Transient IDLE window inside a mutant re-run: never observe mutated plans.
+      return plan
+    }
+    def walk(node: LogicalPlan): Unit = {
+      shim.classify(node, 0, -1).foreach { case (operatorType, candidates) =>
+        val nullGuardOnly = node.expressions.nonEmpty &&
+          node.expressions.forall(_.getClass.getSimpleName == "IsNotNull")
+        MutationCatalogAccess.sink().recordOptimizerObservation(
+          node.getClass.getSimpleName,
+          node.schema.fieldNames.toSet.asJava,
+          candidates.map(c => Integer.valueOf(c.mutationIndex)).toSet.asJava,
+          nullGuardOnly,
+          shim.exprSigSet(node, operatorType).asJava)
+      }
+      node.children.foreach(walk)
+    }
+    walk(plan)
     plan
   }
 
@@ -195,15 +263,17 @@ class CatalystMutationRule(shim: PlanMutatorShim, phase: CatalystMutationRule.Ph
     }
 
     var matched: Option[LogicalPlan] = None
+    var matchedOperatorType: Option[OperatorType] = None
 
     def walk(node: LogicalPlan, depth: Int, childOrdinal: Int): Unit = {
       if (matched.isEmpty) {
-        shim.classify(node, depth, childOrdinal).foreach { case (_, candidates) =>
-          if (candidates.exists { candidate =>
-                candidate.coordinate.toHex == meta.getCoordinateHex &&
-                candidate.mutationIndex == meta.getMutationIndex
-              }) {
+        shim.classify(node, depth, childOrdinal).foreach { case (operatorType, candidates) =>
+          candidates.find { candidate =>
+            candidate.coordinate.toHex == meta.getCoordinateHex &&
+              candidate.mutationIndex == meta.getMutationIndex
+          }.foreach { candidate =>
             matched = Some(node)
+            matchedOperatorType = Some(operatorType)
           }
         }
         if (matched.isEmpty) {
@@ -218,17 +288,86 @@ class CatalystMutationRule(shim: PlanMutatorShim, phase: CatalystMutationRule.Ph
 
     matched match {
       case None =>
-        // No node matches after a full traversal: no-op, do not throw. The
-        // honesty guard turns the residual no-match into a loud ERRORED at
-        // the harness level (no rewrite -> no tracker record).
+        // No node matches the POSITIONAL coordinate. The coordinate embeds
+        // depth+ordinal, so a candidate discovered on one analyzed-plan shape
+        // can be absent from every shape the fork re-analyzes (measured: a
+        // construction-time pipeline vs the count()-wrapped rebuild — the
+        // join sits at depth 8 vs 9, one node off). The discovery-time
+        // re-anchor keys survive both shapes: a node whose SHAPE-FREE
+        // classification matches AND whose whole subtree fingerprint equals
+        // the recorded one is the recorded site (same query, different
+        // top-level wrapper). The deep key is what keeps this from crossing
+        // queries: same-shaped nodes in DIFFERENT queries share the
+        // shape-free key but not the subtree (measured: a hardened-branch
+        // Project and a weak-branch Project with identical output schemas —
+        // shallow-only re-anchoring moved weak-branch mutations onto the
+        // hardened branch and flipped designed SURVIVED to KILLED). If no
+        // node carries both keys, the honesty guard's not-applied
+        // classification stands.
+        val shallowOpt = Option(MutationCatalogAccess.shapeFreeKeyOrNull(activeMutantId))
+          .filter(_.nonEmpty)
+        val deepOpt = Option(MutationCatalogAccess.deepKeyOrNull(activeMutantId))
+          .filter(_.nonEmpty)
+        var reAnchor: Option[LogicalPlan] = None
+        if (shallowOpt.isDefined && deepOpt.isDefined) {
+          def find(node: LogicalPlan): Unit = {
+            if (reAnchor.isEmpty) {
+              shim.classify(node, 0, -1).foreach { case (operatorType, candidates) =>
+                if (toDto(operatorType) == meta.getOperatorType) {
+                  val offersKey = candidates.exists { candidate =>
+                    candidate.coordinate.toHex == shallowOpt.get &&
+                      candidate.mutationIndex == meta.getMutationIndex
+                  }
+                  if (offersKey && DeterministicHasher.hashToHex(deepFingerprint(node)) == deepOpt.get) {
+                    reAnchor = Some(node)
+                  }
+                }
+              }
+              if (reAnchor.isEmpty) node.children.foreach(find)
+            }
+          }
+          find(plan)
+        }
+        reAnchor match {
+          case Some(node) =>
+            shim.classify(node, 0, -1).foreach { case (operatorType, candidates) =>
+              candidates.find(_.mutationIndex == meta.getMutationIndex).foreach { candidate =>
+                recordPendingRewrite(activeMutantId, candidate.coordinate.toHex, node,
+                  shim.exprSigSet(node, operatorType))
+              }
+            }
+            CatalystMutationRule.log(
+              s"DIAG-POSTHOC-REANCHOR mutant=$activeMutantId shapeFreeKey=${shallowOpt.getOrElse("-")} " +
+                s"node=${node.getClass.getSimpleName}")
+          case None =>
+            val found = new StringBuilder
+            var n = 0
+            var total = 0
+            var projects = 0
+            def collect(p: LogicalPlan, depth: Int, ord: Int): Unit = {
+              total += 1
+              if (p.getClass.getSimpleName == "Project") projects += 1
+              shim.classify(p, depth, ord).foreach { case (ot, cands) =>
+                if (toDto(ot) == meta.getOperatorType) {
+                  cands.foreach { c =>
+                    if (n < 8) { found.append(s" ${c.coordinate.toHex}:${c.mutationIndex}"); n += 1 }
+                  }
+                }
+              }
+              p.children.zipWithIndex.foreach { case (ch, i) => collect(ch, depth + 1, i) }
+            }
+            collect(plan, 0, -1)
+            CatalystMutationRule.log(s"DIAG-POSTHOC-NOMATCH mutant=$activeMutantId type=${meta.getOperatorType} want=${meta.getCoordinateHex}:${meta.getMutationIndex} nodes=$total projects=$projects have=$found")
+        }
         plan
       case Some(node) =>
         // Record the node's shape-free key: the coordinate it yields when
         // classified as the plan root. Invariant across the QueryExecution
         // plan clone, optimizer rebuilds, and predicate push-down.
-        shim.classify(node, 0, -1).foreach { case (_, candidates) =>
+        shim.classify(node, 0, -1).foreach { case (operatorType, candidates) =>
           candidates.find(_.mutationIndex == meta.getMutationIndex).foreach { candidate =>
-            recordPendingRewrite(activeMutantId, candidate.coordinate.toHex, node)
+            recordPendingRewrite(activeMutantId, candidate.coordinate.toHex, node,
+              shim.exprSigSet(node, operatorType))
           }
         }
         plan
@@ -327,16 +466,64 @@ class CatalystMutationRule(shim: PlanMutatorShim, phase: CatalystMutationRule.Ph
       // Refusing an ambiguous fallback keeps verdicts load-independent: the
       // honesty guard classifies the run as not-applied, which the mutation
       // score excludes. A miss here still leaves that classification intact.
+      //
+      // The fallback is EPOCH-SCOPED: it may only re-identify the recorded
+      // node within the optimization passes of the analysis that recorded the
+      // pending. In a LATER query a same-class node is a different site —
+      // matching it there made verdicts depend on which query happened to
+      // present a candidate (flaky KILLED vs NOT_APPLIED across runs). The
+      // exact shape-free-key match above is deliberately NOT epoch-scoped:
+      // the key is the site's position-independent identity and legitimately
+      // re-identifies the node in later analyses (pipeline construction moves
+      // nodes between the post-hoc match and the final optimization).
       var fallbackCandidates: List[LogicalPlan] = Nil
       def collectFallbackCandidates(node: LogicalPlan): Unit = {
         val candidateFieldNames = node.schema.map(_.name).toSet
+        // Site-identity: a candidate is the recorded site only if their
+        // expression fingerprints INTERSECT. Two same-shaped sites built over
+        // differently-typed sources (e.g. an implicit CAST for a JSON-inferred
+        // BIGINT vs an INT LocalRelation) have disjoint fingerprint sets —
+        // matching across them applied the mutation to the WRONG site.
+        val candidateSigSet =
+          if (pending.exprSigSet.isEmpty) Set.empty[String]
+          else meta.getOperatorType match {
+            case OperatorTypeDto.JOIN      => shim.exprSigSet(node, OperatorType.Join)
+            case OperatorTypeDto.FILTER    => shim.exprSigSet(node, OperatorType.Filter)
+            case OperatorTypeDto.AGGREGATE => shim.exprSigSet(node, OperatorType.Aggregate)
+            case OperatorTypeDto.WINDOW    => shim.exprSigSet(node, OperatorType.Window)
+            case OperatorTypeDto.PROJECT   => shim.exprSigSet(node, OperatorType.Project)
+            case OperatorTypeDto.OTHER     => Set.empty[String]
+          }
+        val sameClass = node.getClass.getSimpleName == pending.nodeClass
+        val colsOk = pending.referencedColumns.isEmpty ||
+          pending.referencedColumns.exists(candidateFieldNames.contains)
+        val guardOk = !isInsertedNullGuard(node, pending.exprClasses)
+        val offersOk = offersMutationIndex(node, meta.getMutationIndex)
+        val intersection = candidateSigSet.intersect(pending.exprSigSet)
+        // Trivial sigs ("#<ordinal>") are pure attribute pass-throughs: every
+        // same-shape node built over the same source columns renders them
+        // identically, so they cannot disambiguate the recorded site from
+        // impostors (measured: 5 candidates all passing the old intersection
+        // check, refusing every intermediate-plan PROJECT mutant as ambiguous).
+        // Computed sigs (aliases, functions, literals) are the site's
+        // fingerprint: the true evolved site still PRODUCES them, impostors
+        // merely pass columns through. When the recording had computed sigs,
+        // require the candidate to preserve at least one of them.
+        // String.matches (not Regex.matches): Regex#matches only exists in
+        // Scala 2.13+, and this file also compiles under 2.12 (the _2.12
+        // bundle); String#matches delegates to Pattern in both binaries.
+        val computedRecorded = pending.exprSigSet.filterNot(_.matches(TrivialSigPattern))
+        val sigOk =
+          if (pending.exprSigSet.isEmpty) true
+          else if (computedRecorded.isEmpty) intersection.nonEmpty
+          else intersection.exists(sig => !sig.matches(TrivialSigPattern))
         if (!node.getTagValue(AlreadyMutatedTag).contains(true) &&
             node.schema.nonEmpty &&
-            node.getClass.getSimpleName == pending.nodeClass &&
-            (pending.referencedColumns.isEmpty ||
-              pending.referencedColumns.exists(candidateFieldNames.contains)) &&
-            !isInsertedNullGuard(node, pending.exprClasses) &&
-            offersMutationIndex(node, meta.getMutationIndex)) {
+            sameClass &&
+            colsOk &&
+            guardOk &&
+            offersOk &&
+            sigOk) {
           fallbackCandidates = fallbackCandidates :+ node
         }
         node.children.foreach(collectFallbackCandidates)
@@ -366,8 +553,10 @@ class CatalystMutationRule(shim: PlanMutatorShim, phase: CatalystMutationRule.Ph
         // rules. Keep the pending entry so later batches can still match;
         // if no batch ever matches, the honesty guard classifies the fork as
         // not-applied (tracker stays empty).
+        CatalystMutationRule.log(s"DIAG-OPT-NOMATCH mutant=$activeMutantId type=${meta.getOperatorType}")
         plan
       case Some(node) =>
+        CatalystMutationRule.log(s"DIAG-OPT-MATCH mutant=$activeMutantId type=${meta.getOperatorType}")
         val rewritten = meta.getOperatorType match {
           case OperatorTypeDto.JOIN      => shim.mutateJoin(node, meta.getMutationIndex)
           case OperatorTypeDto.FILTER    => shim.mutateFilter(node, meta.getMutationIndex)
@@ -460,6 +649,21 @@ class CatalystMutationRule(shim: PlanMutatorShim, phase: CatalystMutationRule.Ph
           }
       }
     }
+  }
+
+  /**
+   * Position-free subtree fingerprint: class simple name + output schema
+   * (names and types — exprId-free) per node, recursive over children. Two
+   * analyses of the SAME query produce identical fingerprints regardless of
+   * top-level wrappers (the fingerprint is rooted at the node, so ancestors
+   * are invisible); two DIFFERENT queries with same-shaped roots differ in
+   * the subtree. This is the re-anchor identity's deep half.
+   */
+  private def deepFingerprint(p: LogicalPlan): String = {
+    val self = p.getClass.getSimpleName +
+      "[" + p.schema.fields.map(f => f.name + ":" + f.dataType.simpleString).mkString(",") + "]"
+    if (p.children.isEmpty) self + "()"
+    else self + "(" + p.children.map(deepFingerprint).mkString(";") + ")"
   }
 
   /** Explicit total mapping; no string reflection. */
@@ -569,6 +773,14 @@ object CatalystMutationRule {
   /** Tags a node that has already been rewritten for the active mutant. */
   private[mutator] val AlreadyMutatedTag = TreeNodeTag[Boolean]("spark-mutator.alreadyMutated")
 
+  /** A sig that is exactly a positional attribute placeholder: the shim's
+    * substituteAttrTokens renders a pure AttributeReference as "#<ordinal>".
+    * Such a sig carries no site identity (every pass-through over the same
+    * columns renders identically); see the identity fallback's sig criterion.
+    * Deliberately a String (not Regex): consumed via String#matches, which
+    * exists in both Scala 2.12 and 2.13 — Regex#matches is 2.13-only. */
+  private[mutator] val TrivialSigPattern = "^#\\d+$"
+
   /**
    * Cross-phase handoff from PostHoc (match) to Optimizer (rewrite).
    *
@@ -604,18 +816,23 @@ object CatalystMutationRule {
       shapeFreeKey: String,
       nodeClass: String,
       referencedColumns: Set[String],
-      exprClasses: Set[String])
+      exprClasses: Set[String],
+      exprSigSet: Set[String])
 
   private val pendingRewrite = new AtomicReference[PendingRewrite](null)
 
   private def recordPendingRewrite(
-      mutantId: String, shapeFreeKey: String, node: LogicalPlan): Unit =
+      mutantId: String,
+      shapeFreeKey: String,
+      node: LogicalPlan,
+      exprSigSet: Set[String]): Unit =
     pendingRewrite.set(PendingRewrite(
       mutantId,
       shapeFreeKey,
       node.getClass.getSimpleName,
       node.expressions.flatMap(_.references).map(_.name).toSet,
-      node.expressions.flatMap(_.collect { case e => e.getClass.getSimpleName }).toSet))
+      node.expressions.flatMap(_.collect { case e => e.getClass.getSimpleName }).toSet,
+      exprSigSet))
 
   private def peekPendingRewrite(): PendingRewrite = pendingRewrite.get()
 

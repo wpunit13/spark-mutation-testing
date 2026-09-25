@@ -499,9 +499,9 @@ class ShimImplSpec extends AnyFunSuite with BeforeAndAfterAll {
     //   exprSig    = #0;#1;sum(#x) AS `sum(#x)`;#0;#1
     //   coordinate = 1|AGGREGATE|0|<exprSig>
     //   mutantId   = test/path|<coordinateHex>|AGGREGATE|0
-    val GOLDEN_SIG = "#0;#1;sum(#x) AS `sum(#x)`;#0;#1"
-    val GOLDEN_COORDINATE = "5fa3d5da36b4095e"
-    val GOLDEN_MUTANT_ID = "6896f83575625e63"
+    val GOLDEN_SIG = "#0;#1;sum(#2) AS `sum(#2)`;#0;#1"
+    val GOLDEN_COORDINATE = "fe5b25eeb073863f"
+    val GOLDEN_MUTANT_ID = "412cd8d65167e462"
 
     val aggNode = findAggregate(groupedAggregated())
 
@@ -514,24 +514,30 @@ class ShimImplSpec extends AnyFunSuite with BeforeAndAfterAll {
     assert(sig == GOLDEN_SIG, s"aggregate signature drifted:\n  got  = $sig\n  want = $GOLDEN_SIG")
 
     val coordinate = NodeCoordinateFactory(1, OperatorType.Aggregate, 0, sig)
-    assert(coordinate.toHex == GOLDEN_COORDINATE)
+    assert(coordinate.toHex == GOLDEN_COORDINATE,
+      s"aggregate coordinate drifted:\n  got  = ${coordinate.toHex}\n  want = $GOLDEN_COORDINATE")
 
     val (_, candidates) = shim.classify(aggNode, 1, 0).getOrElse(fail("expected Aggregate candidates"))
     assert(candidates.map(_.mutationIndex) == Seq(0, 1, 2))
     assert(candidates.forall(_.coordinate.toHex == GOLDEN_COORDINATE))
 
     val mutantId = DeterministicHasher.computeMutantId("test/path", coordinate.toHex, "AGGREGATE", 0)
-    assert(mutantId == GOLDEN_MUTANT_ID)
+    assert(mutantId == GOLDEN_MUTANT_ID,
+      s"aggregate mutantId drifted:\n  got  = $mutantId\n  want = $GOLDEN_MUTANT_ID")
   }
 
-  test("classify on Window node returns Window with candidates 0 (INVERT_WINDOW_ORDER) and 1 (TRUNCATE_WINDOW_FRAME)") {
+  test("classify on Window node returns Window with candidate 0 (INVERT_WINDOW_ORDER); TRUNCATE is not offered for ranking functions") {
     val winNode = findWindow(windowed())
     val result = shim.classify(winNode, 2, 0)
 
     val (opType, candidates) = result.getOrElse(fail("expected Some for a Window node"))
     assert(opType == OperatorType.Window)
-    assert(candidates.map(_.mutationIndex) == Seq(0, 1))
-    assert(candidates.map(_.description) == Seq("INVERT_WINDOW_ORDER", "TRUNCATE_WINDOW_FRAME"))
+    // row_number() ignores the frame entirely, so TRUNCATE_WINDOW_FRAME would
+    // be a guaranteed no-op — a mutant that applies, changes nothing, and is
+    // reported SURVIVED (a false blind spot). Only INVERT_WINDOW_ORDER is
+    // offered for ranking-function windows.
+    assert(candidates.map(_.mutationIndex) == Seq(0))
+    assert(candidates.map(_.description) == Seq("INVERT_WINDOW_ORDER"))
     assert(candidates.forall(_.operatorType == OperatorType.Window))
 
     val sig = shim.canonicalExprSig(winNode, OperatorType.Window)
@@ -755,14 +761,18 @@ class ShimImplSpec extends AnyFunSuite with BeforeAndAfterAll {
     assert(sig == GOLDEN_WIN_SIG, s"window signature drifted:\n  got  = $sig\n  want = $GOLDEN_WIN_SIG")
 
     val coordinate = NodeCoordinateFactory(2, OperatorType.Window, 0, sig)
-    assert(coordinate.toHex == GOLDEN_WIN_COORDINATE)
+    assert(coordinate.toHex == GOLDEN_WIN_COORDINATE,
+      s"window coordinate drifted:\n  got  = ${coordinate.toHex}\n  want = $GOLDEN_WIN_COORDINATE")
 
     val (_, candidates) = shim.classify(winNode, 2, 0).getOrElse(fail("expected Window candidates"))
-    assert(candidates.map(_.mutationIndex) == Seq(0, 1))
+    // row_number() ignores the frame, so TRUNCATE_WINDOW_FRAME (index 1) is
+    // deliberately not offered — see the classify test above.
+    assert(candidates.map(_.mutationIndex) == Seq(0))
     assert(candidates.forall(_.coordinate.toHex == GOLDEN_WIN_COORDINATE))
 
     val mutantId = DeterministicHasher.computeMutantId("test/path", coordinate.toHex, "WINDOW", 0)
-    assert(mutantId == GOLDEN_WIN_MUTANT_ID)
+    assert(mutantId == GOLDEN_WIN_MUTANT_ID,
+      s"window mutantId drifted:\n  got  = $mutantId\n  want = $GOLDEN_WIN_MUTANT_ID")
   }
 
   test("golden cross-version: pinned canonical decimal-project query yields byte-identical NodeCoordinate and MutantID") {

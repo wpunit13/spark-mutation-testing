@@ -369,6 +369,45 @@ class MutationLoopCoordinatorTest {
     }
 
     @Test
+    void staleAppliedMarkerFromPreviousRunIsClearedBeforeTheLoop() throws Exception {
+        // A previous run sharing the output directory (interrupted run,
+        // differently-scoped run) leaves applied/<id>.json behind. Without the
+        // pre-loop cleanup, classify() sees the stale marker, skips the
+        // NOT_APPLIED branch, and records a fork that errored with "Mutation
+        // was not applied" as KILLED — a fabricated kill that inflates the
+        // mutation score to 100%.
+        AppliedMarkerStore.write(tempDir, MUTANT_1);
+
+        Map<String, SurefireExecutor.SurefireResult> outcomes = new LinkedHashMap<>();
+        // The fork fails loudly (the shim throws on not-applied) and writes no
+        // marker of its own.
+        outcomes.put(MUTANT_1, SurefireExecutor.SurefireResult.failure(60L,
+                "Mutation was not applied (coordinate matched no plan node)", 1));
+        // MUTANT_2 applies and is killed in THIS run — its fresh marker must
+        // survive the pre-loop cleanup.
+        outcomes.put(MUTANT_2, SurefireExecutor.SurefireResult.failure(60L,
+                "Expected [42] but found [0]", 1));
+
+        StubExecutor mockExecutor = new StubExecutor(
+                tempDir, List.of(meta(MUTANT_1), meta(MUTANT_2)), outcomes, 100L, Set.of(MUTANT_2));
+
+        MutationLoopCoordinator coordinator = new MutationLoopCoordinator(
+                mockExecutor, 2.0, tempDir.toFile(), 0.0);
+
+        MutationLoopCoordinator.MutationLoopResult result = coordinator.execute();
+
+        assertEquals(1, result.getNotApplied(),
+                "stale marker must not flip a not-applied fork to KILLED");
+        assertEquals(1, result.getKilled());
+        assertEquals(0, result.getErrored());
+        assertEquals(0, result.getSurvived());
+        assertFalse(Files.exists(tempDir.resolve("applied").resolve(MUTANT_1 + ".json")),
+                "the stale marker from the previous run must be gone");
+        assertTrue(Files.exists(tempDir.resolve("applied").resolve(MUTANT_2 + ".json")),
+                "the fresh marker written by this run's fork must survive");
+    }
+
+    @Test
     void timeoutTakesPrecedenceOverMissingAppliedMarker() throws Exception {
         Map<String, SurefireExecutor.SurefireResult> outcomes = new LinkedHashMap<>();
         outcomes.put(MUTANT_1, SurefireExecutor.SurefireResult.timeout(250L, "Timed out after 200ms"));

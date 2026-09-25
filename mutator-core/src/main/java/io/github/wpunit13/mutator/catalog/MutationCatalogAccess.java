@@ -45,6 +45,27 @@ public final class MutationCatalogAccess {
     }
 
     /**
+     * The discovery-time SHAPE-FREE re-anchor key recorded for
+     * {@code mutantId}, or null when discovery never recorded one. See
+     * {@link MutationCatalogSink#recordReAnchorKey}.
+     */
+    public static String shapeFreeKeyOrNull(String mutantId) {
+        InMemoryMutationCatalog.ReAnchorKey key =
+                InMemoryMutationCatalog.getInstance().reAnchorKeyOrNull(mutantId);
+        return key == null ? null : key.shapeFreeKey();
+    }
+
+    /**
+     * The discovery-time DEEP re-anchor key (subtree fingerprint) recorded
+     * for {@code mutantId}, or null. See {@link MutationCatalogSink#recordReAnchorKey}.
+     */
+    public static String deepKeyOrNull(String mutantId) {
+        InMemoryMutationCatalog.ReAnchorKey key =
+                InMemoryMutationCatalog.getInstance().reAnchorKeyOrNull(mutantId);
+        return key == null ? null : key.deepKey();
+    }
+
+    /**
      * Replaces the entry's {@code astDiffSnippet} (WP-19 plan-diff capture).
      * Called by the Catalyst rule immediately after a rewrite is applied; the
      * snippet is pure observation and never alters the plan, the coordinate
@@ -64,6 +85,32 @@ public final class MutationCatalogAccess {
 
     /** Test-only reset; delegates to the backing singleton. */
     public static void clearForTesting() {
+        InMemoryMutationCatalog.getInstance().clearForTesting();
+    }
+
+    /** Marks the mutation loop as running; discovery/observation freeze. */
+    public static void markMutationLoopStarted() {
+        InMemoryMutationCatalog.getInstance().markMutationLoopStarted();
+    }
+
+    /** True once a mutant has been activated in this JVM (see the singleton). */
+    public static boolean isMutationLoopStarted() {
+        return InMemoryMutationCatalog.getInstance().isMutationLoopStarted();
+    }
+
+    /**
+     * Resets the catalog (entries, site hints, optimizer observations) for a
+     * fresh discovery run. Called by the JUnit 5 bridge at each annotated
+     * class's baseline start in in-process standalone mode, so a class's
+     * mutation loop only sees the mutants discovered from its own plans —
+     * the JVM-wide singleton would otherwise leak earlier classes' mutants
+     * into this class's loop (cross-class contamination: mutants from other
+     * classes' plans get forked against this class's queries, where they
+     * either never apply or — worse — match a same-shaped node and corrupt
+     * attribution). Fork mode must NOT call this: its baseline fork runs the
+     * whole suite and must accumulate every class's mutants.
+     */
+    public static void resetForDiscovery() {
         InMemoryMutationCatalog.getInstance().clearForTesting();
     }
 

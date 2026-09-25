@@ -58,15 +58,15 @@ class SparkVersionDetectorTest {
 
         assertNotNull(coordinate);
         assertEquals("io.github.wpunit13", coordinate.getGroupId());
-        assertEquals("interceptor-spark-3.5_2.13", coordinate.getArtifactId());
+        assertEquals("interceptor-bundle-spark-3.5_2.13", coordinate.getArtifactId());
         assertEquals("1.0.0-SNAPSHOT", coordinate.getVersion());
         assertEquals("3.5.3", coordinate.getSparkVersion());
         assertEquals("3.5", coordinate.getSparkMinor());
         assertEquals("2.13", coordinate.getScalaVersion());
         assertEquals("3.5_2.13", coordinate.getKey());
-        assertEquals("io.github.wpunit13:interceptor-spark-3.5_2.13:1.0.0-SNAPSHOT", coordinate.getCoordinate());
-        assertEquals("io.github.wpunit13:interceptor-spark-3.5_2.13:1.0.0-SNAPSHOT", coordinate.toString());
-        assertEquals("io.github.wpunit13:interceptor-spark-3.5_2.13:1.0.0-SNAPSHOT", detector.detectCoordinate(artifacts));
+        assertEquals("io.github.wpunit13:interceptor-bundle-spark-3.5_2.13:1.0.0-SNAPSHOT", coordinate.getCoordinate());
+        assertEquals("io.github.wpunit13:interceptor-bundle-spark-3.5_2.13:1.0.0-SNAPSHOT", coordinate.toString());
+        assertEquals("io.github.wpunit13:interceptor-bundle-spark-3.5_2.13:1.0.0-SNAPSHOT", detector.detectCoordinate(artifacts));
     }
 
     @Test
@@ -79,8 +79,8 @@ class SparkVersionDetectorTest {
         SparkVersionDetector.InterceptorCoordinate coordinate = detector.detect(artifacts);
 
         assertNotNull(coordinate);
-        assertEquals("interceptor-spark-3.5_2.12", coordinate.getArtifactId());
-        assertEquals("io.github.wpunit13:interceptor-spark-3.5_2.12:1.0.0-SNAPSHOT", coordinate.getCoordinate());
+        assertEquals("interceptor-bundle-spark-3.5_2.12", coordinate.getArtifactId());
+        assertEquals("io.github.wpunit13:interceptor-bundle-spark-3.5_2.12:1.0.0-SNAPSHOT", coordinate.getCoordinate());
     }
 
     @Test
@@ -94,13 +94,13 @@ class SparkVersionDetectorTest {
 
         assertNotNull(coordinate);
         assertEquals("io.github.wpunit13", coordinate.getGroupId());
-        assertEquals("interceptor-spark-4.2_2.13", coordinate.getArtifactId());
+        assertEquals("interceptor-bundle-spark-4.2_2.13", coordinate.getArtifactId());
         assertEquals("1.0.0-SNAPSHOT", coordinate.getVersion());
         assertEquals("4.2.0", coordinate.getSparkVersion());
         assertEquals("4.2", coordinate.getSparkMinor());
         assertEquals("2.13", coordinate.getScalaVersion());
         assertEquals("4.2_2.13", coordinate.getKey());
-        assertEquals("io.github.wpunit13:interceptor-spark-4.2_2.13:1.0.0-SNAPSHOT", coordinate.getCoordinate());
+        assertEquals("io.github.wpunit13:interceptor-bundle-spark-4.2_2.13:1.0.0-SNAPSHOT", coordinate.getCoordinate());
     }
 
     @ParameterizedTest
@@ -186,7 +186,7 @@ class SparkVersionDetectorTest {
         );
 
         SparkVersionDetector.InterceptorCoordinate coordinate = detector.detect(artifacts);
-        assertEquals("io.github.wpunit13:interceptor-spark-3.5_2.13:2.1.0", coordinate.getCoordinate());
+        assertEquals("io.github.wpunit13:interceptor-bundle-spark-3.5_2.13:2.1.0", coordinate.getCoordinate());
     }
 
     @Test
@@ -198,7 +198,7 @@ class SparkVersionDetectorTest {
         ));
 
         SparkVersionDetector.InterceptorCoordinate coordinate = detector.detect(project);
-        assertEquals("io.github.wpunit13:interceptor-spark-3.5_2.13:1.0.0-SNAPSHOT", coordinate.getCoordinate());
+        assertEquals("io.github.wpunit13:interceptor-bundle-spark-3.5_2.13:1.0.0-SNAPSHOT", coordinate.getCoordinate());
     }
 
     @Test

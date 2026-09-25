@@ -8,6 +8,7 @@ import io.github.wpunit13.mutator.MutantRegistry;
 import io.github.wpunit13.mutator.catalog.MutationCatalogAccess;
 import io.github.wpunit13.mutator.catalog.MutationCatalogIo;
 import io.github.wpunit13.mutator.model.MutantStatus;
+import io.github.wpunit13.mutator.model.StructuralInvalidation;
 import io.github.wpunit13.mutator.report.AppliedMarkerStore;
 import io.github.wpunit13.mutator.report.ReportSink;
 import io.github.wpunit13.mutator.report.ReportWriter;
@@ -146,6 +147,17 @@ public class SparkMutatorExtension implements
         MutantBootstrap.activateFromSystemProperties();
 
         boolean isBaseline = (MutantRegistry.getInstance().getActiveMutantOrNull() == null);
+        if (isBaseline && MutantBootstrap.phaseOrNull() == null) {
+            // In-process standalone: scope this class's loop to its own
+            // discoveries AND its own outcomes. The JVM-wide catalog singleton
+            // would otherwise leak earlier annotated classes' mutants into
+            // this class's loop (cross-class contamination), and the JVM-wide
+            // outcome sink would leak their verdicts into this class's gate
+            // counts. Fork mode is excluded: its baseline fork runs the whole
+            // suite and must accumulate every class's mutants.
+            MutationCatalogAccess.resetForDiscovery();
+            ReportSink.clearForTesting();
+        }
         getStore(context).put("baselineMode", isBaseline);
         getStore(context).put(KEY_BASELINE_START, System.currentTimeMillis());
     }
@@ -191,7 +203,19 @@ public class SparkMutatorExtension implements
                 // Suppress AssertionError so test runner indicates mutant was successfully killed
                 return;
             } else {
-                recordOutcomeQuietly(activeMutant, STATUS_ERRORED, elapsed, failureDetail);
+                // A mutation that was applied but structurally invalidated the
+                // plan (the mutated node stopped producing a column the rest
+                // of the plan references) is a designed skip, not an engine
+                // failure: excluded from the score and the gate's not-applied
+                // denominator, visible in the report with the reason.
+                boolean mutationApplied = activeMutant.equals(AppliedMutantTracker.lastOrNull());
+                if (mutationApplied && StructuralInvalidation.matches(
+                        StructuralInvalidation.renderChain(throwable))) {
+                    recordOutcomeQuietly(activeMutant, "SKIPPED", elapsed,
+                            "mutation structurally invalidated the plan: " + failureDetail);
+                } else {
+                    recordOutcomeQuietly(activeMutant, STATUS_ERRORED, elapsed, failureDetail);
+                }
                 throw throwable;
             }
         }
@@ -288,8 +312,10 @@ public class SparkMutatorExtension implements
 
         // WP-24 governance gate: real-failure ERRORED is zero-tolerance (a
         // dead session or shim violation means the harness/engine is broken);
-        // the designed not-applied population is ratio-gated. Runs after the
-        // report is written so the artifact survives the failure.
+        // the designed not-applied population is ratio-gated, optionally scoped
+        // to an accountable set of operator families via
+        // spark.mutator.notAppliedExemptMutators. Runs after the report is
+        // written so the artifact survives the failure.
         List<String> populationViolations = ReportWriter.evaluateGateViolations(
                 MutationCatalogAccess.allEntries().size(),
                 ReportSink.countByStatus(MutantStatus.ERRORED),
@@ -298,7 +324,10 @@ public class SparkMutatorExtension implements
                 intProperty(MutantBootstrap.PROP_MAX_ERRORED_COUNT,
                         ReportWriter.DEFAULT_MAX_ERRORED_COUNT),
                 doubleProperty(MutantBootstrap.PROP_MAX_NOT_APPLIED_RATIO,
-                        ReportWriter.DEFAULT_MAX_NOT_APPLIED_RATIO));
+                        ReportWriter.DEFAULT_MAX_NOT_APPLIED_RATIO),
+                ReportSink.familyStats(),
+                ReportWriter.parseOperatorTypesCsv(
+                        System.getProperty(MutantBootstrap.PROP_NOT_APPLIED_EXEMPT_MUTATORS)));
         if (!populationViolations.isEmpty()) {
             throw new IllegalStateException(
                     "WP-24 governance gate failed: " + String.join("; ", populationViolations));
@@ -516,7 +545,10 @@ public class SparkMutatorExtension implements
             failureDetail = root.getMessage() != null ? root.getMessage() : root.toString();
         } else if (root != null) {
             errored = true;
-            failureDetail = "Unhandled exception: " + root.toString();
+            // Render the full cause chain: the structural-invalidation markers
+            // (plan binding/resolution errors) live in nested causes, not the
+            // wrapper's message.
+            failureDetail = "Unhandled exception: " + StructuralInvalidation.renderChain(root);
         }
         recordMutantOutcome(mutantId, killed, errored, failureDetail, elapsed);
         return true;
@@ -591,7 +623,15 @@ public class SparkMutatorExtension implements
         if (killed) {
             recordOutcomeQuietly(mutantId, "KILLED", elapsed, failureDetail);
         } else if (errored) {
-            recordOutcomeQuietly(mutantId, STATUS_ERRORED, elapsed, failureDetail);
+            if (mutationApplied && failureDetail != null
+                    && StructuralInvalidation.matches(failureDetail)) {
+                // Applied but the mutated plan could not execute: designed
+                // skip, not an engine/harness failure.
+                recordOutcomeQuietly(mutantId, "SKIPPED", elapsed,
+                        "mutation structurally invalidated the plan: " + failureDetail);
+            } else {
+                recordOutcomeQuietly(mutantId, STATUS_ERRORED, elapsed, failureDetail);
+            }
         } else if (!mutationApplied) {
             // WP-24: the rewrite never executed (node hidden inside a cache,
             // pruned stub, shape that never ran). Designed and shape-dependent

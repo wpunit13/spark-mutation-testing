@@ -107,6 +107,20 @@ public class MutateMojo extends AbstractMojo {
     private double maxNotAppliedRatio = 0.20;
 
     /**
+     * WP-24 not-applied gate scope: comma-separated {@code OperatorTypeDto}
+     * names ({@code JOIN}, {@code FILTER}, {@code AGGREGATE}, {@code WINDOW},
+     * {@code PROJECT}, {@code OTHER}) whose not-applied mutants are exempt from
+     * the {@code maxNotAppliedRatio} check. Empty (the default) keeps the ratio
+     * global. Scope it when one family drifts under Catalyst rewriting far more
+     * than the rest — {@code PROJECT} is the extreme, since the optimizer
+     * collapses aliases and prunes columns — so the gate stays sharp on the
+     * other families instead of flaking on the noisy one. See
+     * {@code developer-guide §4.2}.
+     */
+    @Parameter(property = "spark.mutator.notAppliedExemptMutators")
+    private List<String> notAppliedExemptMutators = new ArrayList<>();
+
+    /**
      * Runs every mapped test per killed mutant (no fail-fast) so the fork's
      * surefire XML records ALL failing tests, not just the first. Feeds the
      * test-value report's sole-killer verdicts; costs runtime on killed
@@ -515,14 +529,17 @@ public class MutateMojo extends AbstractMojo {
         // WP-24 population gates first: real-failure ERRORED is zero-tolerance
         // (a dead session or shim violation means the harness/engine is broken);
         // the designed not-applied population is ratio-gated (complex plans
-        // with cached branches legitimately produce some).
+        // with cached branches legitimately produce some), optionally scoped to
+        // an accountable set of operator families via notAppliedExemptMutators.
         List<String> populationViolations = ReportWriter.evaluateGateViolations(
                 loopResult.getTotalMutants(),
                 loopResult.getErrored(),
                 loopResult.getNotApplied(),
                 0,
                 maxErroredCount,
-                maxNotAppliedRatio);
+                maxNotAppliedRatio,
+                loopResult.getNotAppliedByFamily(),
+                ReportWriter.parseOperatorTypes(notAppliedExemptMutators));
         if (!populationViolations.isEmpty()) {
             populationViolations.forEach(getLog()::error);
             failGate(loopResult, String.join("; ", populationViolations));
@@ -606,6 +623,10 @@ public class MutateMojo extends AbstractMojo {
 
     void setExcludedMutators(List<String> excludedMutators) {
         this.excludedMutators = excludedMutators;
+    }
+
+    void setNotAppliedExemptMutators(List<String> notAppliedExemptMutators) {
+        this.notAppliedExemptMutators = notAppliedExemptMutators;
     }
 
     void setExitProcessOnGateFailure(boolean exitProcessOnGateFailure) {

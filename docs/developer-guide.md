@@ -31,8 +31,9 @@ does four things on `mvn spark-mutation-testing:mutate`:
 
 1. **Detect** the Spark/Scala version from the project's **test** classpath
    (`SparkVersionDetector`).
-2. **Resolve** the matching `interceptor-spark-<major.minor>_<scala>` bundle via
-   Maven Resolver/Aether.
+2. **Resolve** the matching `interceptor-bundle-spark-<combo>` bundle via
+   Maven Resolver/Aether (the shaded fat jar — the only interceptor artifact
+   published to Central; the thin `interceptor-spark-*` shims are internal).
 3. **Configure** Surefire: append
    `-Dspark.sql.extensions=io.github.wpunit13.mutator.MutatorSparkExtension` to
    `argLine` and add the interceptor JAR to `additionalClasspathElements`
@@ -307,6 +308,7 @@ table below) applies. The same values can be supplied per-invocation instead:
 | `minMutationScore` | `spark.mutator.minMutationScore` | `0.0` | score floor (`0.0` = gate off) |
 | `maxErroredCount` | `spark.mutator.maxErroredCount` | `0` | WP-24: max real-failure ERRORED (dead sessions, shim violations, mutation crashes); zero tolerance by default, negative disables |
 | `maxNotAppliedRatio` | `spark.mutator.maxNotAppliedRatio` | `0.20` | WP-24: max ratio of designed not-applied mutants (`notApplied / (total − skipped)`); negative disables |
+| `notAppliedExemptMutators` | `spark.mutator.notAppliedExemptMutators` | *(empty)* | WP-24: comma-separated OperatorType names whose not-applied mutants are removed from the ratio gate's numerator **and** denominator (both surfaces). Empty = global ratio. Scope it when one family drifts under Catalyst rewriting far more than the rest (`PROJECT` is the extreme) so the gate stays sharp on the accountable families; the report's `notApplied` count still shows the exempt population |
 | `perTestAttribution` | `spark.mutator.perTestAttribution` | `false` | runs every mapped test per killed mutant (no fail-fast) so the report names ALL failing tests — feeds the test-value report's sole-killer verdicts; costs runtime on killed mutants |
 | `targetModules` | `spark.mutator.targetModules` | *(empty)* | comma-separated module-path prefixes limiting Discovery (see §3.1 for the engine-side semantics) |
 | `excludedMutators` | `spark.mutator.excludedMutators` | *(empty)* | comma-separated OperatorType names excluded from mutation; echoed into the report's `config.excludedMutators` block |
@@ -336,6 +338,8 @@ All parameters in a single `<configuration>` block:
     <minMutationScore>80.0</minMutationScore>   <!-- 0.0 = score gate off -->
     <maxErroredCount>0</maxErroredCount>        <!-- negative = disabled -->
     <maxNotAppliedRatio>0.20</maxNotAppliedRatio> <!-- negative = disabled -->
+    <!-- Optional: exempt a noisy family from the not-applied ratio only -->
+    <notAppliedExemptMutators>PROJECT</notAppliedExemptMutators>
 
     <!-- Comma-separated on the CLI; one element per <targetModules> here -->
     <targetModules>com.example.pipeline.transforms</targetModules>
@@ -486,7 +490,14 @@ artifacts always survive a failure):
    not-applied population (nodes hidden inside caches, pruned stubs, shapes
    that never execute) is shape-dependent and legitimate in bounded quantities
    — `notApplied / (totalMutants − skipped) > maxNotAppliedRatio` fails the
-   gate; negative disables.
+   gate; negative disables. Drift is not uniform across operator families, so
+   `spark.mutator.notAppliedExemptMutators` (empty by default) removes named
+   families from **both** terms of the ratio. Exempting the noisy family
+   (`PROJECT` — its nodes lose aliases and columns under optimization, so the
+   identity fallback refuses ambiguous matches more often) keeps the gate sharp
+   on `JOIN`/`FILTER`/`AGGREGATE`/`WINDOW` instead of letting a global ratio
+   flake on one family. The exempt population is still counted in the report's
+   `notApplied`; it is simply not gated.
 3. **Score floor (opt-in).** `spark.mutator.minMutationScore` (default `0.0`
    = off): `score < minScore` fails the gate.
 

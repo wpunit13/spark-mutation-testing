@@ -141,12 +141,12 @@ class ShimImplSpec extends AnyFunSuite with BeforeAndAfterAll {
     // the analyzer's dedup Project sits above the join).
     //   coordinate = 1|JOIN|0|<exprSig>
     //   mutantId   = test/path|<coordinateHex>|JOIN|<index>
-    val GOLDEN_SIG = "INNER;(#1 = #1)"
-    val GOLDEN_COORDINATE = "523338459279a153"
+    val GOLDEN_SIG = "INNER;(#0 = #0)"
+    val GOLDEN_COORDINATE = "a3807adba8111702"
     val GOLDEN_MUTANT_IDS = Map(
-      0 -> "9a8161b978ff8f54",
-      1 -> "2a7e335fa2c10d16",
-      2 -> "89c4588b903bc4bd")
+      0 -> "001c77840e4e9e7b",
+      1 -> "f0b093292da991bc",
+      2 -> "8392ea67cbed25f2")
 
     val (joinNode, depth, ordinal) = findNode(orders.join(customers, Seq("customer_id")), { case j: Join => j })
     assert((depth, ordinal) == (1, 0), "canonical join plan shape drifted")
@@ -155,16 +155,19 @@ class ShimImplSpec extends AnyFunSuite with BeforeAndAfterAll {
     assert(sig == GOLDEN_SIG, s"join signature drifted:\n  got  = $sig\n  want = $GOLDEN_SIG")
 
     val coordinate = NodeCoordinateFactory(depth, OperatorType.Join, ordinal, sig)
-    assert(coordinate.toHex == GOLDEN_COORDINATE)
+    assert(coordinate.toHex == GOLDEN_COORDINATE,
+      s"join coordinate drifted:\n  got  = ${coordinate.toHex}\n  want = $GOLDEN_COORDINATE")
 
     val (_, candidates) = shim.classify(joinNode, depth, ordinal).getOrElse(fail("expected Join candidates"))
     assert(candidates.map(_.mutationIndex) == Seq(0, 1, 2))
     assert(candidates.forall(_.coordinate.toHex == GOLDEN_COORDINATE))
 
-    GOLDEN_MUTANT_IDS.foreach { case (index, goldenId) =>
+    val joinIdDiffs = GOLDEN_MUTANT_IDS.toSeq.map { case (index, goldenId) =>
       val mutantId = DeterministicHasher.computeMutantId("test/path", coordinate.toHex, "JOIN", index)
-      assert(mutantId == goldenId, s"JOIN mutant id drifted for index $index")
-    }
+      if (mutantId == goldenId) None
+      else Some(s"index $index:\n  got  = $mutantId\n  want = $goldenId")
+    }.flatten
+    assert(joinIdDiffs.isEmpty, s"JOIN mutant ids drifted:\n${joinIdDiffs.mkString(";\n")}")
   }
 
   // ---------------------------------------------------------------------------
@@ -175,13 +178,13 @@ class ShimImplSpec extends AnyFunSuite with BeforeAndAfterAll {
     // Canonical query: orders WHERE amount > 100 AND status = 'COMPLETED'
     // (top-level And — all four filter mutants). The Filter is the analyzed
     // plan's root: depth 0, ordinal -1.
-    val GOLDEN_SIG = "((#2 > 100) AND (#3 = 'COMPLETED'))"
-    val GOLDEN_COORDINATE = "72661923281222c8"
+    val GOLDEN_SIG = "((#0 > 100) AND (#1 = 'COMPLETED'))"
+    val GOLDEN_COORDINATE = "4b0996046cc6e864"
     val GOLDEN_MUTANT_IDS = Map(
-      0 -> "3e568eb2d3b0a0de",
-      1 -> "c27b1025b6fcfcac",
-      2 -> "a58232bc47cc1ee6",
-      3 -> "d119c06180d1b06b")
+      0 -> "1d2d888db674589f",
+      1 -> "4cae1e1de571000a",
+      2 -> "8e21925399649a67",
+      3 -> "22f823f7afdee84b")
 
     val (filterNode, depth, ordinal) = findNode(orders.where("amount > 100 AND status = 'COMPLETED'"), { case f: Filter => f })
     assert((depth, ordinal) == (0, -1), "canonical filter plan shape drifted")
@@ -190,16 +193,19 @@ class ShimImplSpec extends AnyFunSuite with BeforeAndAfterAll {
     assert(sig == GOLDEN_SIG, s"filter signature drifted:\n  got  = $sig\n  want = $GOLDEN_SIG")
 
     val coordinate = NodeCoordinateFactory(depth, OperatorType.Filter, ordinal, sig)
-    assert(coordinate.toHex == GOLDEN_COORDINATE)
+    assert(coordinate.toHex == GOLDEN_COORDINATE,
+      s"filter coordinate drifted:\n  got  = ${coordinate.toHex}\n  want = $GOLDEN_COORDINATE")
 
     val (_, candidates) = shim.classify(filterNode, depth, ordinal).getOrElse(fail("expected Filter candidates"))
     assert(candidates.map(_.mutationIndex) == Seq(0, 1, 2, 3))
     assert(candidates.forall(_.coordinate.toHex == GOLDEN_COORDINATE))
 
-    GOLDEN_MUTANT_IDS.foreach { case (index, goldenId) =>
+    val filterIdDiffs = GOLDEN_MUTANT_IDS.toSeq.map { case (index, goldenId) =>
       val mutantId = DeterministicHasher.computeMutantId("test/path", coordinate.toHex, "FILTER", index)
-      assert(mutantId == goldenId, s"FILTER mutant id drifted for index $index")
-    }
+      if (mutantId == goldenId) None
+      else Some(s"index $index:\n  got  = $mutantId\n  want = $goldenId")
+    }.flatten
+    assert(filterIdDiffs.isEmpty, s"FILTER mutant ids drifted:\n${filterIdDiffs.mkString(";\n")}")
   }
 
   // ---------------------------------------------------------------------------
@@ -213,9 +219,9 @@ class ShimImplSpec extends AnyFunSuite with BeforeAndAfterAll {
     // the 3.5 golden was pinned at.
     //   coordinate = 1|AGGREGATE|0|<exprSig>
     //   mutantId   = test/path|<coordinateHex>|AGGREGATE|0
-    val GOLDEN_SIG = "#0;#1;sum(#x) AS `sum(#x)`;#0;#1"
-    val GOLDEN_COORDINATE = "5fa3d5da36b4095e"
-    val GOLDEN_MUTANT_ID = "6896f83575625e63"
+    val GOLDEN_SIG = "#0;#1;sum(#2) AS `sum(#2)`;#0;#1"
+    val GOLDEN_COORDINATE = "fe5b25eeb073863f"
+    val GOLDEN_MUTANT_ID = "412cd8d65167e462"
 
     val aggNode = findNode(groupedAggregated(), { case a: Aggregate => a })._1
 
@@ -223,14 +229,16 @@ class ShimImplSpec extends AnyFunSuite with BeforeAndAfterAll {
     assert(sig == GOLDEN_SIG, s"aggregate signature drifted:\n  got  = $sig\n  want = $GOLDEN_SIG")
 
     val coordinate = NodeCoordinateFactory(1, OperatorType.Aggregate, 0, sig)
-    assert(coordinate.toHex == GOLDEN_COORDINATE)
+    assert(coordinate.toHex == GOLDEN_COORDINATE,
+      s"aggregate coordinate drifted:\n  got  = ${coordinate.toHex}\n  want = $GOLDEN_COORDINATE")
 
     val (_, candidates) = shim.classify(aggNode, 1, 0).getOrElse(fail("expected Aggregate candidates"))
     assert(candidates.map(_.mutationIndex) == Seq(0, 1, 2))
     assert(candidates.forall(_.coordinate.toHex == GOLDEN_COORDINATE))
 
     val mutantId = DeterministicHasher.computeMutantId("test/path", coordinate.toHex, "AGGREGATE", 0)
-    assert(mutantId == GOLDEN_MUTANT_ID)
+    assert(mutantId == GOLDEN_MUTANT_ID,
+      s"aggregate mutantId drifted:\n  got  = $mutantId\n  want = $GOLDEN_MUTANT_ID")
   }
 
   // ---------------------------------------------------------------------------
@@ -254,7 +262,10 @@ class ShimImplSpec extends AnyFunSuite with BeforeAndAfterAll {
     assert(coordinate.toHex == GOLDEN_WIN_COORDINATE)
 
     val (_, candidates) = shim.classify(winNode, 2, 0).getOrElse(fail("expected Window candidates"))
-    assert(candidates.map(_.mutationIndex) == Seq(0, 1))
+    // row_number() ignores the frame, so TRUNCATE_WINDOW_FRAME (index 1) is
+    // deliberately not offered — a frame mutation on a ranking function is a
+    // guaranteed no-op that would report a false SURVIVED.
+    assert(candidates.map(_.mutationIndex) == Seq(0))
     assert(candidates.forall(_.coordinate.toHex == GOLDEN_WIN_COORDINATE))
 
     val mutantId = DeterministicHasher.computeMutantId("test/path", coordinate.toHex, "WINDOW", 0)
@@ -268,11 +279,11 @@ class ShimImplSpec extends AnyFunSuite with BeforeAndAfterAll {
   test("golden cross-version: pinned canonical project query yields byte-identical NodeCoordinate and MutantID") {
     // Canonical query: select(coalesce(name, 'UNKNOWN') AS c_name, val) — the
     // Project is the analyzed plan's root: depth 0, ordinal -1.
-    val GOLDEN_SIG = "coalesce(#x, 'UNKNOWN') AS c_#x;#1"
-    val GOLDEN_COORDINATE = "435897d126803574"
+    val GOLDEN_SIG = "coalesce(#0, 'UNKNOWN') AS c_#0;#1"
+    val GOLDEN_COORDINATE = "cd1ae578be563fec"
     val GOLDEN_MUTANT_IDS = Map(
-      0 -> "ecb78e13d4ac5ef4",
-      1 -> "fb8ca8b5f2494d7f")
+      0 -> "84686ddc3e9de87a",
+      1 -> "06572f90236be6c6")
 
     val (projNode, depth, ordinal) = findNode(coalesced(), { case p: Project => p })
     assert((depth, ordinal) == (0, -1), "canonical project plan shape drifted")
@@ -281,16 +292,19 @@ class ShimImplSpec extends AnyFunSuite with BeforeAndAfterAll {
     assert(sig == GOLDEN_SIG, s"project signature drifted:\n  got  = $sig\n  want = $GOLDEN_SIG")
 
     val coordinate = NodeCoordinateFactory(depth, OperatorType.Project, ordinal, sig)
-    assert(coordinate.toHex == GOLDEN_COORDINATE)
+    assert(coordinate.toHex == GOLDEN_COORDINATE,
+      s"project coordinate drifted:\n  got  = ${coordinate.toHex}\n  want = $GOLDEN_COORDINATE")
 
     val (_, candidates) = shim.classify(projNode, depth, ordinal).getOrElse(fail("expected Project candidates"))
     assert(candidates.map(_.mutationIndex) == Seq(0, 1))
     assert(candidates.forall(_.coordinate.toHex == GOLDEN_COORDINATE))
 
-    GOLDEN_MUTANT_IDS.foreach { case (index, goldenId) =>
+    val projectIdDiffs = GOLDEN_MUTANT_IDS.toSeq.map { case (index, goldenId) =>
       val mutantId = DeterministicHasher.computeMutantId("test/path", coordinate.toHex, "PROJECT", index)
-      assert(mutantId == goldenId, s"PROJECT mutant id drifted for index $index")
-    }
+      if (mutantId == goldenId) None
+      else Some(s"index $index:\n  got  = $mutantId\n  want = $goldenId")
+    }.flatten
+    assert(projectIdDiffs.isEmpty, s"PROJECT mutant ids drifted:\n${projectIdDiffs.mkString(";\n")}")
   }
 
   test("golden cross-version: pinned canonical decimal-project query yields byte-identical NodeCoordinate and MutantID") {

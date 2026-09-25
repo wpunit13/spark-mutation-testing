@@ -119,6 +119,15 @@ class QualityGateTest {
                 2, 1, 1, 0, 0, 0, score, tempDir.resolve("mutation-report.json").toString());
     }
 
+    private MutationLoopCoordinator.MutationLoopResult notAppliedResult(
+            java.util.Map<io.github.wpunit13.mutator.model.OperatorTypeDto,
+                    io.github.wpunit13.mutator.report.ReportWriter.FamilyStats> byFamily) {
+        // 32/115 not-applied = 0.278 > 0.20 → the default global ratio gate breaches.
+        return new MutationLoopCoordinator.MutationLoopResult(
+                115, 82, 1, 0, 0, 32, 98.8,
+                tempDir.resolve("mutation-report.json").toString(), byFamily);
+    }
+
     @Test
     void qualityGateExitsWithCode2WhenThresholdIsBreached() throws Exception {
         java.util.List<Integer> exitSink = new java.util.ArrayList<>();
@@ -194,5 +203,61 @@ class QualityGateTest {
                 org.apache.maven.plugin.MojoFailureException.class, mojo::execute);
         assertTrue(exitSink.isEmpty(),
                 "reactor-safe mode must fail via MojoFailureException, never System.exit");
+    }
+
+    @Test
+    void notAppliedRatioBreachesThePopulationGateWithoutAnExemptList() throws Exception {
+        // 32/115 ≈ 0.278 > 0.20 and PROJECT is NOT exempt → the gate fires.
+        java.util.Map<io.github.wpunit13.mutator.model.OperatorTypeDto,
+                io.github.wpunit13.mutator.report.ReportWriter.FamilyStats> families =
+                java.util.Map.of(
+                        io.github.wpunit13.mutator.model.OperatorTypeDto.PROJECT,
+                        new io.github.wpunit13.mutator.report.ReportWriter.FamilyStats(85, 32, 0),
+                        io.github.wpunit13.mutator.model.OperatorTypeDto.AGGREGATE,
+                        new io.github.wpunit13.mutator.report.ReportWriter.FamilyStats(30, 0, 0));
+        java.util.List<Integer> exitSink = new java.util.ArrayList<>();
+        MutateMojo mojo = mojoWithLoopResult(notAppliedResult(families), 0.0, exitSink);
+
+        assertDoesNotThrow(mojo::execute);
+        assertEquals(java.util.List.of(2), exitSink,
+                "a not-applied ratio over the floor must breach the gate by default");
+    }
+
+    @Test
+    void notAppliedExemptMutatorsScopeThePopulationGateToAccountableFamilies() throws Exception {
+        // Same run, but PROJECT is exempt → accountable ratio 0/30 = 0 → passes.
+        java.util.Map<io.github.wpunit13.mutator.model.OperatorTypeDto,
+                io.github.wpunit13.mutator.report.ReportWriter.FamilyStats> families =
+                java.util.Map.of(
+                        io.github.wpunit13.mutator.model.OperatorTypeDto.PROJECT,
+                        new io.github.wpunit13.mutator.report.ReportWriter.FamilyStats(85, 32, 0),
+                        io.github.wpunit13.mutator.model.OperatorTypeDto.AGGREGATE,
+                        new io.github.wpunit13.mutator.report.ReportWriter.FamilyStats(30, 0, 0));
+        java.util.List<Integer> exitSink = new java.util.ArrayList<>();
+        MutateMojo mojo = mojoWithLoopResult(notAppliedResult(families), 0.0, exitSink);
+        mojo.setNotAppliedExemptMutators(java.util.List.of("PROJECT"));
+
+        assertDoesNotThrow(mojo::execute);
+        assertTrue(exitSink.isEmpty(),
+                "an exempt family's not-applied mutants must not trip the gate");
+    }
+
+    @Test
+    void exemptingOneFamilyDoesNotMuteTheAccountableFamilies() throws Exception {
+        // PROJECT exempt, but AGGREGATE carries 5/20 = 0.25 > 0.20 → gate fires.
+        java.util.Map<io.github.wpunit13.mutator.model.OperatorTypeDto,
+                io.github.wpunit13.mutator.report.ReportWriter.FamilyStats> families =
+                java.util.Map.of(
+                        io.github.wpunit13.mutator.model.OperatorTypeDto.PROJECT,
+                        new io.github.wpunit13.mutator.report.ReportWriter.FamilyStats(85, 32, 0),
+                        io.github.wpunit13.mutator.model.OperatorTypeDto.AGGREGATE,
+                        new io.github.wpunit13.mutator.report.ReportWriter.FamilyStats(20, 5, 0));
+        java.util.List<Integer> exitSink = new java.util.ArrayList<>();
+        MutateMojo mojo = mojoWithLoopResult(notAppliedResult(families), 0.0, exitSink);
+        mojo.setNotAppliedExemptMutators(java.util.List.of("PROJECT"));
+
+        assertDoesNotThrow(mojo::execute);
+        assertEquals(java.util.List.of(2), exitSink,
+                "exempting a noisy family must keep the gate sharp on the rest");
     }
 }

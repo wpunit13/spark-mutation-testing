@@ -141,6 +141,7 @@ Full property surface, verified against the engine and extension code:
 | `spark.mutator.minMutationScore` | unset | score floor; unset = gate off |
 | `spark.mutator.maxErroredCount` | `0` | WP-24: max real-failure ERRORED (dead sessions, shim violations); negative disables |
 | `spark.mutator.maxNotAppliedRatio` | `0.20` | WP-24: max designed not-applied ratio; negative disables |
+| `spark.mutator.notAppliedExemptMutators` | *(empty)* | WP-24: CSV of operator types (`JOIN`, `FILTER`, `AGGREGATE`, `WINDOW`, `PROJECT`, `OTHER`) exempt from the not-applied ratio — removed from both its numerator and denominator. Scope it when one family drifts far more than the rest (`PROJECT`) so the gate stays sharp on the others |
 | `spark.mutator.enabled` / `spark.mutator.disabled` | — | force the extension on/off — `disabled=true` gives a plain baseline run with no mutation loop |
 | `spark.mutator.outputDirectory` | `target/spark-mutator-reports` (a Maven-ism) | report dir; §3 points it at Gradle's `build/` instead |
 | `spark.mutator.excludedMutators` | *(empty)* | CSV of operator types (`JOIN`, `FILTER`, `AGGREGATE`, `WINDOW`, `PROJECT`, `OTHER`); the engine skips them at discovery AND refuses to rewrite them mid-run |
