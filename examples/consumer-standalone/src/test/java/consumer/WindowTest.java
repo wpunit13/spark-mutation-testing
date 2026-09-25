@@ -18,11 +18,14 @@ class WindowTest {
     void rankedSalariesExactRows() {
         Dataset<Row> ranked = Pipelines.rankedSalaries(SparkTestSupport.employees());
 
-        // sum(int) over window -> bigint (Long).
+        // sum(int) over window -> bigint (Long). eng has 3 rows so a frame
+        // truncation (UnboundedPreceding -> 1 Preceding) is observable: the
+        // 3rd row's frame excludes the 1st, changing its dept_total.
         List<List<Object>> expected = Arrays.asList(
-                Arrays.asList("Ann", "eng", 120, 1, 220L),
-                Arrays.asList("Bob", "eng", 100, 2, 220L),
-                Arrays.asList("Cid", "ops", 80, 1, 80L));
+                Arrays.asList("Ann", "eng", 120, 1, 310L),
+                Arrays.asList("Bob", "eng", 100, 2, 310L),
+                Arrays.asList("Cid", "ops", 80, 1, 80L),
+                Arrays.asList("Eve", "eng", 90, 3, 310L));
 
         List<List<Object>> actual = new ArrayList<>();
         for (Row row : ranked.orderBy("name").collectAsList()) {

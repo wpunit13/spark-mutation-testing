@@ -60,6 +60,7 @@ class SparkTestSupport {
         return spark.createDataFrame(java.util.Arrays.asList(
                 RowFactory.create("Ann", "eng", 120),
                 RowFactory.create("Bob", "eng", 100),
+                RowFactory.create("Eve", "eng", 90),
                 RowFactory.create("Cid", "ops", 80)), schema);
     }
 

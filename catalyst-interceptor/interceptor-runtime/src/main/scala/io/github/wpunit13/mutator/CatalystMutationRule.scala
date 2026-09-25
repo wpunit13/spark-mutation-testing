@@ -161,11 +161,6 @@ class CatalystMutationRule(shim: PlanMutatorShim, phase: CatalystMutationRule.Ph
               coordinateHex,
               operatorTag,
               candidate.mutationIndex)
-            // TEMP-DEBUG
-            if (dto == io.github.wpunit13.mutator.model.OperatorTypeDto.FILTER) {
-              println("[spark-mutator-disc] " + candidate.coordinate.toHex + " idx=" + candidate.mutationIndex
-                + " sig=" + shim.canonicalExprSig(node, io.github.wpunit13.mutator.api.OperatorType.Filter))
-            }
             // -1 for lineNumber: nothing computes a real source line yet and
             // the model documents -1 as "unknown".
             MutationCatalogAccess.sink().registerCandidate(
@@ -177,6 +172,20 @@ class CatalystMutationRule(shim: PlanMutatorShim, phase: CatalystMutationRule.Ph
               coordinateHex,
               mutantId)
             MutationCatalogAccess.sink().recordSiteHint(mutantId, nodeClass, referencedColumns, exprClasses, siteSigSet)
+            // Shape-free re-anchor: the node's root classification. The
+            // fork-time PostHoc match keys on the POSITIONAL coordinate
+            // (depth- and ordinal-sensitive), so a candidate discovered on a
+            // construction-time plan shape can be absent from every plan the
+            // fork re-analyzes when the harness rebuilds the same pipeline
+            // under a different top-level consumer (e.g. the plain pipeline
+            // vs a count()-wrapped one). The shape-free key survives both
+            // shapes, letting the no-match path re-anchor the pending.
+            MutationCatalogAccess.sink().recordShapeFreeKey(
+              mutantId,
+              shim.classify(node, 0, -1)
+                .map(_._2.filter(_.mutationIndex == candidate.mutationIndex)
+                  .map(_.coordinate.toHex).mkString(","))
+                .getOrElse(""))
           }
         }
       }
@@ -276,27 +285,67 @@ class CatalystMutationRule(shim: PlanMutatorShim, phase: CatalystMutationRule.Ph
 
     matched match {
       case None =>
-        // No node matches after a full traversal: no-op, do not throw. The
-        // honesty guard turns the residual no-match into a loud ERRORED at
-        // the harness level (no rewrite -> no tracker record).
-        val found = new StringBuilder
-        var n = 0
-        var total = 0
-        var projects = 0
-        def collect(p: LogicalPlan, depth: Int, ord: Int): Unit = {
-          total += 1
-          if (p.getClass.getSimpleName == "Project") projects += 1
-          shim.classify(p, depth, ord).foreach { case (ot, cands) =>
-            if (toDto(ot) == meta.getOperatorType) {
-              cands.foreach { c =>
-                if (n < 8) { found.append(s" ${c.coordinate.toHex}:${c.mutationIndex}"); n += 1 }
+        // No node matches the POSITIONAL coordinate. The coordinate embeds
+        // depth+ordinal, so a candidate discovered on one analyzed-plan shape
+        // can be absent from every shape the fork re-analyzes (measured: a
+        // construction-time pipeline vs the count()-wrapped rebuild — the
+        // join sits at depth 8 vs 9, one node off). The discovery-time
+        // SHAPE-FREE key survives both shapes; if some node in THIS plan
+        // classifies to it, that node is the recorded site and the pending
+        // is seeded from it. Never crash the rule; if no node carries the
+        // key either, the honesty guard's not-applied classification stands.
+        val shapeFree = Option(MutationCatalogAccess.shapeFreeKeyOrNull(activeMutantId))
+          .filter(_.nonEmpty)
+          .map(_.split(",").toSet)
+          .getOrElse(Set.empty[String])
+        var reAnchor: Option[LogicalPlan] = None
+        if (shapeFree.nonEmpty) {
+          def find(node: LogicalPlan): Unit = {
+            if (reAnchor.isEmpty) {
+              shim.classify(node, 0, -1).foreach { case (operatorType, candidates) =>
+                if (toDto(operatorType) == meta.getOperatorType) {
+                  val keys = candidates.map(_.coordinate.toHex).toSet
+                  if (shapeFree.forall(keys.contains)) {
+                    reAnchor = Some(node)
+                  }
+                }
               }
+              if (reAnchor.isEmpty) node.children.foreach(find)
             }
           }
-          p.children.zipWithIndex.foreach { case (ch, i) => collect(ch, depth + 1, i) }
+          find(plan)
         }
-        collect(plan, 0, -1)
-        CatalystMutationRule.log(s"DIAG-POSTHOC-NOMATCH mutant=$activeMutantId type=${meta.getOperatorType} want=${meta.getCoordinateHex}:${meta.getMutationIndex} nodes=$total projects=$projects have=$found")
+        reAnchor match {
+          case Some(node) =>
+            shim.classify(node, 0, -1).foreach { case (operatorType, candidates) =>
+              candidates.find(_.mutationIndex == meta.getMutationIndex).foreach { candidate =>
+                recordPendingRewrite(activeMutantId, candidate.coordinate.toHex, node,
+                  shim.exprSigSet(node, operatorType))
+              }
+            }
+            CatalystMutationRule.log(
+              s"DIAG-POSTHOC-REANCHOR mutant=$activeMutantId shapeFreeKey=${shapeFree.mkString(",")} " +
+                s"node=${node.getClass.getSimpleName}")
+          case None =>
+            val found = new StringBuilder
+            var n = 0
+            var total = 0
+            var projects = 0
+            def collect(p: LogicalPlan, depth: Int, ord: Int): Unit = {
+              total += 1
+              if (p.getClass.getSimpleName == "Project") projects += 1
+              shim.classify(p, depth, ord).foreach { case (ot, cands) =>
+                if (toDto(ot) == meta.getOperatorType) {
+                  cands.foreach { c =>
+                    if (n < 8) { found.append(s" ${c.coordinate.toHex}:${c.mutationIndex}"); n += 1 }
+                  }
+                }
+              }
+              p.children.zipWithIndex.foreach { case (ch, i) => collect(ch, depth + 1, i) }
+            }
+            collect(plan, 0, -1)
+            CatalystMutationRule.log(s"DIAG-POSTHOC-NOMATCH mutant=$activeMutantId type=${meta.getOperatorType} want=${meta.getCoordinateHex}:${meta.getMutationIndex} nodes=$total projects=$projects have=$found")
+        }
         plan
       case Some(node) =>
         // Record the node's shape-free key: the coordinate it yields when

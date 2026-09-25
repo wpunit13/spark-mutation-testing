@@ -40,6 +40,7 @@ final class InMemoryMutationCatalog implements MutationCatalogSink {
 
     private final Map<String, MutantMetadata> catalog = new ConcurrentHashMap<>();
     private final Map<String, SiteHint> siteHints = new ConcurrentHashMap<>();
+    private final Map<String, String> shapeFreeKeys = new ConcurrentHashMap<>();
     private final Set<OptimizerObservation> optimizerObservations = ConcurrentHashMap.newKeySet();
 
     /**
@@ -120,6 +121,16 @@ final class InMemoryMutationCatalog implements MutationCatalogSink {
     }
 
     @Override
+    public void recordShapeFreeKey(String mutantId, String shapeFreeKey) {
+        shapeFreeKeys.putIfAbsent(mutantId, shapeFreeKey);
+    }
+
+    /** The discovery-time shape-free key for {@code mutantId}, or null. */
+    String shapeFreeKeyOrNull(String mutantId) {
+        return shapeFreeKeys.get(mutantId);
+    }
+
+    @Override
     public void recordOptimizerObservation(
             String nodeClass, Set<String> schemaFieldNames,
             Set<Integer> offeredMutationIndexes, boolean insertedNullGuardOnly,
@@ -168,29 +179,32 @@ final class InMemoryMutationCatalog implements MutationCatalogSink {
      * Viability = the Optimizer-phase matcher could find at least one node:
      * some observed node of the hint's class offers the candidate's mutation
      * index, is not a pure inserted-null-guard (the fallback refuses those),
-     * and — the site-identity check — whose expression fingerprint set
-     * INTERSECTS the hint's. The optimizer can only remove expressions
-     * (pruning, conversion) or add condition conjuncts (pushdown), so a
-     * surviving site's set always intersects; a different site built over a
-     * differently-typed source (e.g. an implicit CAST for a JSON-inferred
-     * BIGINT vs an INT LocalRelation) produces a disjoint set and is dropped.
-     * Entries without a hint (loaded from catalog.json in mutant forks, or
-     * registered outside discovery) are always kept.
+     * and — the site-identity check — correlates with the hint's expression
+     * fingerprint set. Entries without a hint (loaded from catalog.json in
+     * mutant forks, or registered outside discovery) are always kept.
      *
-     * The intersection check is COMPUTED-SIG-AWARE: a sig that is exactly a
+     * The correlation check is COMPUTED-SIG-AWARE. A sig that is exactly a
      * positional attribute placeholder ("#<ordinal>", the shim's rendering of
      * a pure pass-through) collides across every same-shape node built over
-     * the same source columns, so an intersection consisting only of trivial
-     * sigs proves nothing about site identity. When the hint carries computed
-     * sigs (aliases, functions, literals — the site's actual fingerprint), an
-     * observation must contain at least one of THOSE to count as the same
-     * site. Without this, a site the optimizer eliminated entirely (e.g.
-     * ConvertToLocalRelation folding a withColumn Project into its
-     * LocalRelation) stays "viable" because impostor pass-through Projects
-     * share its trivial sigs — measured: 73 PROJECT mutants discovered on
-     * construction-time intermediate plans ran the full loop only to report
-     * NOT_APPLIED (the fallback then correctly refuses the impostors as
-     * ambiguous).
+     * the same source columns, so it proves nothing about site identity:
+     *
+     *  - Hint with computed sigs (aliases, functions, literals — the site's
+     *    actual fingerprint): an observation must contain at least one of
+     *    THOSE. Without this, a site the optimizer eliminated entirely (e.g.
+     *    ConvertToLocalRelation folding a withColumn Project into its
+     *    LocalRelation) stays "viable" because impostor pass-through Projects
+     *    share its trivial sigs — measured: 73 PROJECT mutants discovered on
+     *    construction-time intermediate plans ran the full loop only to report
+     *    NOT_APPLIED (the fallback then correctly refuses the impostors as
+     *    ambiguous).
+     *  - ALL-trivial hint (a pure pass-through site): the shape-free key is
+     *    just the ordinal sequence "#0;...;#k", so the Optimizer-phase primary
+     *    match can only ever hit a node whose fingerprint set EQUALS the
+     *    hint's, and the fallback cannot disambiguate impostors (they render
+     *    identical trivial sigs — measured: 5 candidates all passing every
+     *    identity criterion, refused as ambiguous). An exact-set observation
+     *    is therefore the only honest viability signal; anything else can
+     *    only ever report NOT_APPLIED and is dropped.
      */
     private boolean isViable(MutantMetadata entry) {
         SiteHint hint = siteHints.get(entry.getMutantId());
@@ -217,16 +231,13 @@ final class InMemoryMutationCatalog implements MutationCatalogSink {
 
     /** True when the observation's sig set correlates with the hint's: at
       * least one computed (non-pass-through) sig shared when the hint has
-      * computed sigs, otherwise any shared sig. */
+      * computed sigs; otherwise (all-trivial hint) the observation's set must
+      * EQUAL the hint's — see the isViable javadoc for why intersection is
+      * not enough. */
     private static boolean sigSetsCorrelate(Set<String> obsSigs, Set<String> hintSigs,
                                             Set<String> computedHintSigs) {
         if (computedHintSigs.isEmpty()) {
-            for (String sig : obsSigs) {
-                if (hintSigs.contains(sig)) {
-                    return true;
-                }
-            }
-            return false;
+            return obsSigs.equals(hintSigs);
         }
         for (String sig : obsSigs) {
             if (computedHintSigs.contains(sig)) {
@@ -289,6 +300,7 @@ final class InMemoryMutationCatalog implements MutationCatalogSink {
     void clearForTesting() {
         catalog.clear();
         siteHints.clear();
+        shapeFreeKeys.clear();
         optimizerObservations.clear();
         mutationLoopStarted = false;
         lastLoggedDropCount = -1;

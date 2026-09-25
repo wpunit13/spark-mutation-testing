@@ -45,6 +45,16 @@ public final class MutationCatalogAccess {
     }
 
     /**
+     * The discovery-time shape-free key recorded for {@code mutantId}, or
+     * null when discovery never recorded one. See
+     * {@link MutationCatalogSink#recordShapeFreeKey} for what the key is and
+     * why the PostHoc no-match path falls back to it.
+     */
+    public static String shapeFreeKeyOrNull(String mutantId) {
+        return InMemoryMutationCatalog.getInstance().shapeFreeKeyOrNull(mutantId);
+    }
+
+    /**
      * Replaces the entry's {@code astDiffSnippet} (WP-19 plan-diff capture).
      * Called by the Catalyst rule immediately after a rewrite is applied; the
      * snippet is pure observation and never alters the plan, the coordinate

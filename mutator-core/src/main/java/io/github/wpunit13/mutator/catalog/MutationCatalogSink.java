@@ -45,6 +45,20 @@ public interface MutationCatalogSink {
     }
 
     /**
+     * Records the discovery-time SHAPE-FREE key of the candidate's plan node:
+     * the coordinate the node yields when classified as a plan root
+     * (depth=0, ordinal=-1) — position-independent, so it is invariant across
+     * the construction-vs-count-wrapped analyzed-plan shapes the fork-time
+     * PostHoc match otherwise depends on. The PostHoc no-match path seeds the
+     * pending rewrite from this key when the positional coordinate is absent
+     * from the fork's plans (a match the fork could otherwise miss entirely —
+     * measured: the same mutant flips KILLED/NOT_APPLIED across runs purely
+     * on which shape reaches the match phase first).
+     */
+    default void recordShapeFreeKey(String mutantId, String shapeFreeKey) {
+    }
+
+    /**
      * Records one optimizer-walk observation. {@code walkId} identifies the
      * optimizer-batch invocation (one per Optimizer-phase rule application),
      * letting the viability filter replay the fallback's per-walk semantics:
