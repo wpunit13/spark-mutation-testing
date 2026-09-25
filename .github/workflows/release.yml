@@ -248,12 +248,12 @@ jobs:
           # PyPI serves an upload quickly but not atomically with the publish
           # job's completion — retry rather than racing the CDN.
           installed=false
-          for _ in $(seq 1 10); do
+          for attempt in $(seq 1 10); do
             if pip install "pytest-spark-mutation-testing==$VERSION"; then
               installed=true
               break
             fi
-            echo "Not on PyPI yet — waiting 30s..."
+            echo "Not on PyPI yet (attempt ${attempt}/10) — waiting 30s..."
             sleep 30
           done
           [ "$installed" = true ] || { echo "ERROR: wheel not installable from PyPI after 5 minutes" >&2; exit 1; }
@@ -276,12 +276,15 @@ jobs:
         env:
           VERSION: ${{ needs.guard.outputs.version }}
         run: |
-          for _ in $(seq 1 30); do
+          # Named counter, not `_`: $_ is bash's last-argument-of-previous-command
+          # special — the verify-release.sh invocation clobbers it (the poll
+          # displayed "attempt 1.0.1/30" — the version, not the count).
+          for attempt in $(seq 1 30); do
             if bash scripts/verify-release.sh "$VERSION"; then
               echo "Central resolution OK"
               exit 0
             fi
-            echo "Not on Central yet (attempt $_/30) — waiting 60s..."
+            echo "Not on Central yet (attempt ${attempt}/30) — waiting 60s..."
             sleep 60
           done
           echo "ERROR: release coordinates not resolvable from Central after 30 minutes" >&2

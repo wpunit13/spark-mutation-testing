@@ -24,7 +24,7 @@
     <spark.version>3.5.3</spark.version>
     <scala.binary.version>2.13</scala.binary.version>
     <junit.version>5.10.2</junit.version>
-    <mutator.version>1.0.0</mutator.version>
+    <mutator.version>1.0.1</mutator.version>
 
     <!-- Spark's mandatory modular-runtime opens (Java 17), per the
          spark-mutation-testing developer guide §1.2. -->
@@ -70,15 +70,6 @@
           <argLine>${spark.test.jvm.args}</argLine>
           <forkCount>1</forkCount>
           <reuseForks>true</reuseForks>
-          <systemPropertyVariables>
-            <!-- The library's PROJECT matching is nondeterministic on this
-                 multi-shape plan: identical runs classify the same mutants as
-                 KILLED or NOT_APPLIED (measured 16/113 vs 32/115), so no fixed
-                 not-applied ratio is stable. Disable the ratio gate here; the
-                 real-failure ERRORED gate stays at its zero-tolerance default.
-                 See README.md. -->
-            <spark.mutator.maxNotAppliedRatio>-1</spark.mutator.maxNotAppliedRatio>
-          </systemPropertyVariables>
         </configuration>
       </plugin>
 
